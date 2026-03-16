@@ -1,9 +1,11 @@
+import math
+
 import torch
 import torch.distributed as dist
 from model.llm import LLMModel
 
 from chat_llm.utils.common import print_master
-from chat_llm.utils.dist import get_dist_info
+from chat_llm.utils.dist import get_dist_info, is_ddp_initialized
 
 
 @torch.compile(dynamic=False, fullgraph=True)
@@ -405,3 +407,63 @@ def set_optimizer(
         group["initial_lr"] = group["lr"]
 
     return optimizer
+
+
+def optimizer_step(
+    optimizer,
+    scaler=None,
+):
+    if scaler is not None:
+        scaler.unscale_(optimizer)
+        if is_ddp_initialized():
+            for v in scaler._found_inf_per_device(optimizer).values():
+                dist.all_reduce(v, op=dist.ReduceOp.MAX)
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
+
+
+# Learning rate schedule (linear warmup, constant, linear warmdown)
+def get_lr_multiplier(it, warmup_steps, warmdown_ratio, num_iterations, final_lr_frac):
+    warmup_iters = warmup_steps
+    warmdown_iters = round(warmdown_ratio * num_iterations)
+    if it < warmup_iters:
+        return (it + 1) / warmup_iters
+    elif it <= num_iterations - warmdown_iters:
+        return 1.0
+    else:
+        progress = (num_iterations - it) / warmdown_iters
+        return progress * 1.0 + (1 - progress) * final_lr_frac
+
+
+# Momentum scheduler for Muon optimizer (warms up to 0.97 over the first 400 steps)
+def get_muon_momentum(it):
+    frac = min(it / 400, 1)
+    momentum = (1 - frac) * 0.85 + frac * 0.97
+    return momentum
+
+
+# Weight decay scheduler for Muon optimizer (cosine decay to zero over the course of training)
+def get_weight_decay(it, num_iterations, weight_decay_scaled):
+    return weight_decay_scaled * 0.5 * (1 + math.cos(math.pi * it / num_iterations))
+
+
+def update_optimizer_state(
+    optimizer,
+    cur_step,
+    warmup_steps,
+    warmdown_ratio,
+    num_iterations,
+    final_lr_frac,
+    weight_decay_scaled,
+):
+    lrm = get_lr_multiplier(cur_step, warmup_steps, warmdown_ratio, num_iterations, final_lr_frac)
+    muon_momentum = get_muon_momentum(cur_step)
+    muon_weight_decay = get_weight_decay(cur_step, num_iterations, weight_decay_scaled)
+
+    for group in optimizer.param_groups:
+        group["lr"] = group["initial_lr"] * lrm
+        if group["kind"] == "muon":
+            group["momentum"] = muon_momentum
+            group["weight_decay"] = muon_weight_decay

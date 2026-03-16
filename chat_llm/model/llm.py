@@ -123,8 +123,8 @@ class CausalSelfAttention(nn.Module):
 
         if ve is not None and self.ve_gate is not None:
             ve = ve.view(B, T, self.n_kv_heads, self.head_dim)
-            gate = 3 * F.sigmoid(self.ve_gate(ve[:, 0, : self.ve_gate_channels]))  # (B, n_kv_heads
-            v = v + gate[:, :, None, None] * ve
+            gate = 3 * F.sigmoid(self.ve_gate(x[..., : self.ve_gate_channels]))  # (B, n_kv_heads
+            v = v + gate.unsqueeze(-1) * ve
 
         # Apply rotary embeddings to q and k
         q = apply_rotary_embedding(q, cos, sin)
@@ -263,6 +263,7 @@ class LLMModel(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
+    @torch.no_grad()
     def init_weights(self):
         nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.08)
         nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
@@ -362,3 +363,12 @@ class LLMModel(nn.Module):
             ids = torch.cat((ids, next_ids), dim=1)
             token = next_ids.item()
             yield token
+
+
+if __name__ == "__main__":
+    config = ModelConfig()
+    model = LLMModel(config)
+    model.init_weights()
+
+    print("Model parameter count:", sum(p.numel() for p in model.parameters()))
+    print_master("Model initialized successfully")
