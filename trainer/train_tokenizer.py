@@ -2,16 +2,14 @@ import argparse
 import os
 import time
 
-import pyarrow.parquet as pq
-import torch
-
 from chat_llm.tokenizer import HuggingFaceTokenizer
 from chat_llm.utils.common import get_base_dir
+from chat_llm.utils.data import parquets_iter_batched
 
 # -----------------------------------------------------------------------------
-# Parse command line arguments
-base_dir = get_base_dir()
-DATA_DIR = os.path.join(base_dir, "base_data_climbmix")
+
+DATA_DIR = os.environ.get("DATA_DIR")
+TOKENIZER_DIR = os.environ.get("TOKENIZER_DIR")
 
 
 parser = argparse.ArgumentParser(description="Train a BPE tokenizer")
@@ -38,7 +36,7 @@ def text_iterator():
     3) Break when we've seen args.max_chars characters
     """
     nchars = 0
-    for batch in parquets_iter_batched(split="train"):
+    for batch in parquets_iter_batched(DATA_DIR, split="train"):
         for doc in batch:
             doc_text = doc
             if len(doc_text) > args.doc_cap:
@@ -49,6 +47,7 @@ def text_iterator():
                 return
 
 
+base_dir = get_base_dir()
 text_iter = text_iterator()
 
 # -----------------------------------------------------------------------------
@@ -59,8 +58,6 @@ t1 = time.time()
 train_time = t1 - t0
 print(f"Training time: {train_time:.2f}s")
 
-# -----------------------------------------------------------------------------
+
 # Save the tokenizer to disk
-base_dir = get_base_dir()
-tokenizer_dir = os.path.join(base_dir, "tokenizer")
-tokenizer.save(tokenizer_dir)
+tokenizer.save(TOKENIZER_DIR)

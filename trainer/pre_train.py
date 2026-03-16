@@ -73,9 +73,14 @@ def build_model_meta(depth, aspect_ratio, head_dim, vocab_size, max_seq_len, win
 
 
 def main(**kwargs):
-    config = Config(**kwargs)
+    DATA_DIR = os.environ.get("DATA_DIR")
+    TOKENIZER_DIR = os.environ.get("TOKENIZER_DIR")
+    MODEL_DIR = os.environ.get("MODEL_DIR")
+    assert DATA_DIR is not None, "DATA_DIR environment variable is not set"
+    assert TOKENIZER_DIR is not None, "TOKENIZER_DIR environment variable is not set"
+    assert MODEL_DIR is not None, "MODEL_DIR environment variable is not set"
 
-    DATA_DIR = os.getenv("DATA_DIR", "data/processed")
+    config = Config(**kwargs)
 
     device_type = autodetect_device_type() if config.device_type == "" else config.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = dist_init(device_type)
@@ -87,7 +92,7 @@ def main(**kwargs):
     wandb_run = wandb.init(project="chat-llm", name=config.run, config=asdict(config))
 
     # Get Tokenizer
-    tokenizer = get_tokenizer()
+    tokenizer = get_tokenizer(TOKENIZER_DIR)
     vocab_size = tokenizer.get_vocab_size()
     print_master(f"Vocab size: {vocab_size:,}")
 
@@ -110,11 +115,11 @@ def main(**kwargs):
     )
 
     orig_model = model  # This  will point to the same model object throughout, even if we later wrap it in DDP or compile it, which makes it easier to save checkpoints without worrying about unwrapping or tracking multiple references to the model object.
-    compiled_model = torch.compile(model) if config.compiled else model
+    compiled_model = torch.compile(model, dynamic=False) if config.compiled else model
 
     # Set Optimizer
     optimizer = set_optimizer(
-        compiled_model.parameters(),
+        orig_model,
         un_embedding_lr=config.unembedding_lr,
         embedding_lr=config.embedding_lr,
         matrix_lr=config.matrix_lr,
@@ -137,7 +142,7 @@ def main(**kwargs):
     dataloader_resume_state_dict = None
 
     train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
-        DATA_DIR,
+        DATA_DIR,  # data_dir
         tokenizer,
         config.device_batch_size,
         config.max_seq_len,
@@ -168,7 +173,7 @@ def main(**kwargs):
         synchronize()  # make sure all data is ready
         t0 = time.time()
         for micro_step in range(grad_accum_steps):
-            loss = model(x, y)
+            loss = compiled_model(x, y)
             train_loss = loss.item()
             loss = loss / grad_accum_steps
             if scaler is not None:
@@ -179,9 +184,9 @@ def main(**kwargs):
             x, y, dataloader_state_dict = next(train_loader)
 
         # -- Optimizer step
-        optimizer_update(step)
+        optimizer_update(cur_step=step)
         optimizer_step(optimizer, scaler)
-        model.zero_grad(set_to_none=True)
+        compiled_model.zero_grad(set_to_none=False)
 
         synchronize()
         t1 = time.time()

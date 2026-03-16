@@ -2,7 +2,7 @@ import math
 
 import torch
 import torch.distributed as dist
-from model.llm import LLMModel
+import torch.nn as nn
 
 from chat_llm.utils.common import print_master
 from chat_llm.utils.dist import get_dist_info, is_ddp_initialized
@@ -321,6 +321,9 @@ class Optimizer(torch.optim.Optimizer):
         self._finish_gathers(gather_list)
 
 
+from chat_llm.model.llm import LLMModel
+
+
 def set_optimizer(
     model: LLMModel,
     un_embedding_lr: float = 0.004,
@@ -330,8 +333,6 @@ def set_optimizer(
     scalar_lr: float = 0.02,
     **kwargs,
 ):
-    ddp, rank, local_rank, world_size = get_dist_info()
-
     model_dim = model.config.embed_dim
     value_embeds_params = list(model.value_embeds.parameters())
     embedding_params = list(model.transformer.wte.parameters())
@@ -343,7 +344,9 @@ def set_optimizer(
 
     assert len(list(model.parameters())) == len(matrix_params) + len(embedding_params) + len(
         lm_head_params
-    ) + len(resid_params) + len(x0_params), "Parameter count mismatch"
+    ) + len(resid_params) + len(x0_params) + len(value_embeds_params), (
+        f"Parameter count mismatch, with {len(list(model.parameters()))} parameters in the model but {len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(resid_params) + len(x0_params) + len(value_embeds_params)} parameters in the optimizer groups"
+    )
 
     dmodel_lr_scale = (model_dim / 768) ** -0.5
     print_master(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")

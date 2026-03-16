@@ -1,5 +1,5 @@
 #!/bin/bash
-export CHATLLM_DATA_DIR="$HOME/path/to/your/data"
+source "$(dirname "$0")/env.sh"
 
 
 python -m download -n 8

@@ -139,11 +139,7 @@ class HuggingFaceTokenizer:
         print(f"Saved tokenizer to {tokenizer_path}")
 
 
-def get_tokenizer():
-    from chat_llm.utils.common import get_base_dir
-
-    base_dir = get_base_dir()
-    tokenizer_dir = os.path.join(base_dir, "tokenizer")
+def get_tokenizer(tokenizer_dir):
     return HuggingFaceTokenizer.from_directory(tokenizer_dir)
 
 
