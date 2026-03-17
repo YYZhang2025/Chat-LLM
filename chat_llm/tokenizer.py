@@ -148,9 +148,8 @@ def get_token_bytes(device="cpu"):
 
     from chat_llm.utils.common import get_base_dir
 
-    base_dir = get_base_dir()
-    tokenizer_dir = os.path.join(base_dir, "tokenizer")
-    token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
+    TOKENIZER_DIR = os.environ.get("TOKENIZER_DIR", os.path.join(get_base_dir(), "tokenizer"))
+    token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
     assert os.path.exists(token_bytes_path), (
         f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
     )
