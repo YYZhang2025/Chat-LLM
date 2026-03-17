@@ -2,6 +2,8 @@ import argparse
 import os
 import time
 
+import torch
+
 from chat_llm.tokenizer import HuggingFaceTokenizer
 from chat_llm.utils.common import get_base_dir
 from chat_llm.utils.data import parquets_iter_batched
@@ -61,3 +63,21 @@ print(f"Training time: {train_time:.2f}s")
 
 # Save the tokenizer to disk
 tokenizer.save(TOKENIZER_DIR)
+
+# Save the token bytes to disk
+vocab_size = tokenizer.get_vocab_size()
+special_set = set(tokenizer.get_special_tokens())
+token_strings = [tokenizer.decode([token_id]) for token_id in range(vocab_size)]
+token_bytes = []
+for token_id in range(vocab_size):
+    token_str = token_strings[token_id]  # the Python string representation of this token
+    if token_str in special_set:
+        token_bytes.append(0)  # special characters are not counted
+    else:
+        id_bytes = len(token_str.encode("utf-8"))  # number of bytes that make up this token
+        token_bytes.append(id_bytes)
+token_bytes = torch.tensor(token_bytes, dtype=torch.int32, device="cpu")
+token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
+with open(token_bytes_path, "wb") as f:
+    torch.save(token_bytes, f)
+print(f"Saved token_bytes to {token_bytes_path}")

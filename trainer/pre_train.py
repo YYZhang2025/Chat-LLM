@@ -1,13 +1,7 @@
 import os
 
-from chat_llm.scaling_law import get_num_scaling_params
-
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-from chat_llm.optim import optimizer_step, set_optimizer, update_optimizer_state
-from chat_llm.tokenizer import get_tokenizer
-
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import time
 from dataclasses import asdict, dataclass
 from functools import partial
@@ -20,14 +14,23 @@ from chat_llm.dataloader import (
     tokenizing_distributed_data_loader_bos_bestfit,
     tokenizing_distributed_data_loader_with_state_bos_bestfit,
 )
+from chat_llm.eval import evaluate_bpb
 from chat_llm.model.llm import LLMModel, ModelConfig
-from chat_llm.utils.common import COMPUTE_DTYPE, autodetect_device_type, format_with_commas, print_master
+from chat_llm.optim import optimizer_step, set_optimizer, update_optimizer_state
+from chat_llm.tokenizer import get_token_bytes, get_tokenizer
+from chat_llm.utils.common import (
+    COMPUTE_DTYPE,
+    autodetect_device_type,
+    format_with_commas,
+    print_dict_master,
+    print_master,
+)
 from chat_llm.utils.dist import clean_dist, dist_init
 
 
 @dataclass
 class Config:
-    run: str = "dummy"
+    running_name: str = ""
     device_type: str = "cuda"
     # Model hyperparameters
     depth: int = 20
@@ -65,6 +68,9 @@ class Config:
 
 
 def build_model_meta(depth, aspect_ratio, head_dim, vocab_size, max_seq_len, window_pattern):
+    """
+    Build the model on the meta device to get accurate parameter counts without using any real memory, which is important for being able to build large models without OOM issues and to compute accurate scaling law predictions for hyperparameters based on the actual parameter count of the model that will be trained.
+    """
     base_dim = depth * aspect_ratio
     model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
     num_heads = model_dim // head_dim
@@ -100,7 +106,7 @@ def main(**kwargs):
 
     # WanDB setup (only on master process)
     if master_process:
-        wandb_run = wandb.init(project="chat-llm", name=config.run, config=asdict(config))
+        wandb_run = wandb.init(project="chat-llm", name=config.running_name, config=asdict(config))
 
     # Get Tokenizer
     tokenizer = get_tokenizer(TOKENIZER_DIR)
@@ -127,10 +133,23 @@ def main(**kwargs):
 
     orig_model = model  # This  will point to the same model object throughout, even if we later wrap it in DDP or compile it, which makes it easier to save checkpoints without worrying about unwrapping or tracking multiple references to the model object.
     compiled_model = torch.compile(model, dynamic=False) if config.compiled else model
-    
-    
-    
-    from chat_llm.scaling_law import get_num_scaling_params, get_target_batch_size, get_target_tokens_num, get_target_weight_decay
+
+    prompts = [
+        "The capital of France is",
+        "The chemical symbol of gold is",
+        "If yesterday was Friday, then tomorrow will be",
+        "The opposite of hot is",
+        "The planets of the solar system are:",
+        "My favorite color is",
+        "If 5*x + 3 = 13, then x is",
+    ]
+
+    from chat_llm.scaling_law import (
+        get_num_scaling_params,
+        get_target_batch_size,
+        get_target_tokens_num,
+        get_target_weight_decay,
+    )
 
     num_scaling_params = get_num_scaling_params(orig_model)
     tokens_per_fwdbwd = config.device_batch_size * config.max_seq_len
@@ -143,26 +162,31 @@ def main(**kwargs):
         max_seq_len=config.max_seq_len,
         window_pattern=config.window_pattern,
     )  # creates the model on meta device
-    
-    D_REF = (
-        config.target_param_data_ratio
-    ) get_num_scaling_params(d12_ref)  # compute-optimal d12 training horizon in tokens (measured empirically)
+
+    D_REF = (config.target_param_data_ratio) * get_num_scaling_params(
+        d12_ref
+    )  # compute-optimal d12 training horizon in tokens (measured empirically)
     B_REF = 2**19  # optimal batch size at d12 ~= 524,288 tokens (measured empirically)
 
-    total_batch_size = config.total_batch_size if config.total_batch_size > 0 else get_target_batch_size(
-        num_scaling_params, targets_tokens_nums, D_REF, B_REF
+    total_batch_size = (
+        config.total_batch_size
+        if config.total_batch_size > 0
+        else get_target_batch_size(num_scaling_params, targets_tokens_nums, D_REF, B_REF)
     )
-    
+
+    token_bytes = get_token_bytes(device=device)
+
     batch_lr_scale = 1.0
-    batch_ratio = total_batch_size / B_REF 
-    
-    if batch_ratio!= 1.0:
+    batch_ratio = total_batch_size / B_REF
+
+    if batch_ratio != 1.0:
         batch_lr_scale = batch_ratio**0.5  # η ∝ √(B/B_ref)
-    
-    weight_decay_scaled = get_target_weight_decay(config.weight_decay, total_batch_size, B_REF, D_REF, targets_tokens_nums)
+
+    weight_decay_scaled = get_target_weight_decay(
+        config.weight_decay, total_batch_size, B_REF, D_REF, targets_tokens_nums
+    )
     world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
     grad_accum_steps = config.total_batch_size // world_tokens_per_fwdbwd
-
 
     # Set Optimizer
     optimizer = set_optimizer(
@@ -200,31 +224,62 @@ def main(**kwargs):
     build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
         tokenizer, config.device_batch_size, config.max_seq_len, split="val", device=device
     )
-    x, y, dataloader_state_dict = next(train_loader)  # kick off load of the very first batch of data
 
     # Start training loop
 
     step = 0
     tokens_per_fwdbwd = config.device_batch_size * config.max_seq_len
     world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
-    grad_accum_steps = config.total_batch_size // world_tokens_per_fwdbwd
-    
-    print_master(f"Tokens / micro-batch / rank: {config.device_batch_size} x {config.max_seq_len} = {tokens_per_fwdbwd:,}")
-    print_master(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
-    print_master(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
+    grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
 
-    from chat_llm.utils.common import print_dict_master
-    print_dict_master({
-        "Tokens per micro-batch per rank": tokens_per_fwdbwd,
-        "Tokens per micro-batch": world_tokens_per_fwdbwd,
-        "Total batch size": total_batch_size, 
-        "Gradient accumulation steps": grad_accum_steps,  
-    })
+    print_dict_master(
+        {
+            "Tokens per micro-batch per rank": tokens_per_fwdbwd,
+            "Tokens per micro-batch": world_tokens_per_fwdbwd,
+            "Total batch size": total_batch_size,
+            "Gradient accumulation steps": grad_accum_steps,
+        }
+    )
+
+    # Clean up any existing memory allocations before starting the training loop, to ensure we have an accurate measurement of memory usage during the training loop and to avoid any OOM issues caused by fragmentation from the initial model building and data loading steps.
+
+    torch.cuda.empty_cache() if device_type == "cuda" else None
+
+    x, y, dataloader_state_dict = next(train_loader)
     while True:
         last_step = step == config.num_iterations
 
         # Evaluation
-        # pass
+        if config.eval_every > 0 and step % config.eval_every == 0:
+            compiled_model.eval()
+            val_loader = build_val_loader()
+            eval_steps = config.eval_tokens // (
+                config.device_batch_size * config.max_seq_len * ddp_world_size
+            )
+            val_bpb = evaluate_bpb(compiled_model, val_loader, eval_steps, token_bytes)
+
+            print_master(f"Step {step:,} | Validation bpb: {val_bpb:.4f}")
+
+            wandb_run.log(
+                {
+                    "step": step,
+                    "val/bpb": val_bpb,
+                }
+            )
+
+            from chat_llm.engine import GenerateEngine
+            from chat_llm.eval import sample_prompts
+
+            if master_process:
+                engine = GenerateEngine(orig_model, tokenizer)
+                results = sample_prompts(prompts, engine)
+                print_master("Sample generations:")
+                for i, (prompt, generation) in enumerate(results):
+                    print_master(f"Sample {i + 1}:", type="info")
+                    print_master(f"Prompt: {prompt}", type="info")
+                    print_master(f"Generation: {generation}", type="info")
+
+            compiled_model.train()
 
         # Training step
         if last_step:
@@ -259,17 +314,20 @@ def main(**kwargs):
             print_master(
                 f"Step {step:,} | Loss: {train_loss:.4f} | LR: {current_lr:.2e}  | Time: {dt:.2f}s | Max Mem: {format_with_commas(get_max_memory())} bytes"
             )
-            # wandb.log(
-            #     {
-            #         "train/loss": train_loss,
-            #         "train/lr": current_lr,
-            #         "train/step_time": dt,
-            #         "train/max_memory_bytes": get_max_memory(),
-            #     },
-            #     step=step,
-            # )
+            wandb.log(
+                {
+                    "train/loss": train_loss,
+                    "train/lr": current_lr,
+                    "train/step_time": dt,
+                    "train/max_memory_bytes": get_max_memory(),
+                },
+                step=step,
+            )
 
         step += 1
+
+    # Evaluate final model on CORE metric\
+    compiled_model.eval()
 
     # Cleanup
     wandb_run.finish()
