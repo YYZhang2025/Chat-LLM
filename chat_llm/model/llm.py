@@ -145,7 +145,7 @@ class CausalSelfAttention(nn.Module):
                 v_cache,
                 k,
                 v,
-                cache_seqlens=kv_cache.cache_seqlens,
+                cache_seqlens=kv_cache.cache_seq_lens,
                 causal=True,
                 window_size=window_size,
             )
