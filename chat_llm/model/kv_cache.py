@@ -19,10 +19,10 @@ class KVCache:
         self.head_dim = head_dim
 
         self.k_cache = torch.zeros(
-            (num_layers, batch_size, num_heads, seq_len, head_dim), device=device, dtype=dtype
+            (num_layers, batch_size, seq_len, num_heads, head_dim), device=device, dtype=dtype
         )
         self.v_cache = torch.zeros(
-            (num_layers, batch_size, num_heads, seq_len, head_dim), device=device, dtype=dtype
+            (num_layers, batch_size, seq_len, num_heads, head_dim), device=device, dtype=dtype
         )
 
         self.cache_seq_lens = torch.zeros(batch_size, device=device, dtype=torch.long)  # (batch_size,)

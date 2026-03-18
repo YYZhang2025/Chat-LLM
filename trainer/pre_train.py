@@ -246,6 +246,19 @@ def main(**kwargs):
     torch.cuda.empty_cache() if device_type == "cuda" else None
 
     x, y, dataloader_state_dict = next(train_loader)
+
+    compiled_model.eval()
+    from chat_llm.eval import evaluate_core
+
+    results = {}
+    resutls = evaluate_core(compiled_model, tokenizer, config.core_metric_max_per_task)
+    print_master("CORE evaluation results:")
+    for task_name, task_results in resutls.items():
+        print_master(f"Task: {task_name}", type="info")
+        for metric_name, metric_value in task_results.items():
+            print_master(f"{metric_name}: {metric_value:.4f}", type="info")
+            results[f"core/{task_name}_{metric_name}"] = metric_value
+
     while True:
         last_step = step == config.num_iterations
 
@@ -268,19 +281,19 @@ def main(**kwargs):
             #     }
             # )
 
-            from chat_llm.engine import GenerateEngine
-            from chat_llm.eval import sample_prompts
+        from chat_llm.engine import GenerateEngine
+        from chat_llm.eval import sample_prompts
 
-            if master_process:
-                engine = GenerateEngine(orig_model, tokenizer)
-                results = sample_prompts(prompts, engine)
-                print_master("Sample generations:")
-                for i, (prompt, generation) in enumerate(results):
-                    print_master(f"Sample {i + 1}:", type="info")
-                    print_master(f"Prompt: {prompt}", type="info")
-                    print_master(f"Generation: {generation}", type="info")
+        # if master_process:
+        #     compiled_model.eval()
+        #     engine = GenerateEngine(orig_model, tokenizer)
+        #     results = sample_prompts(prompts, engine)
+        #     print_master("Sample generations:")
+        #     for i, generated in enumerate(results):
+        #         print_master(f"Sample {i + 1}:", type="info")
+        #         print_master(f"Generation: {generated}", type="info")
 
-            compiled_model.train()
+        #     compiled_model.train()
 
         # Training step
         if last_step:
@@ -328,17 +341,6 @@ def main(**kwargs):
         step += 1
 
     # Evaluate final model on CORE metric\
-    compiled_model.eval()
-    from chat_llm.eval import evaluate_core
-
-    results = {}
-    resutls = evaluate_core(compiled_model, tokenizer, config.core_metric_max_per_task)
-    print_master("CORE evaluation results:")
-    for task_name, task_results in resutls.items():
-        print_master(f"Task: {task_name}", type="info")
-        for metric_name, metric_value in task_results.items():
-            print_master(f"{metric_name}: {metric_value:.4f}", type="info")
-            results[f"core/{task_name}_{metric_name}"] = metric_value
 
     # Cleanup
     # wandb_run.finish()

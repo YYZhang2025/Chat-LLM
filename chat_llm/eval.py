@@ -194,7 +194,7 @@ def sample_prompts(
     results = []
     for prompt in prompts:
         tokens = tokenizer.encode(prompt)
-        sample, _ = engine.generate(
+        sample, _ = engine.generate_batch(
             tokens, num_samples=1, max_tokens=256, temperature=0.0, top_k=1, seed=42
         )  # max_tokens=0 means "generate until the end"
         sample = sample[0]  # remove batch dimension

@@ -87,16 +87,21 @@ def use_calculator(expr):
 
 @torch.inference_mode()
 def sample_next_token(logits, rng, temperature=1.0, top_k=None):
-    if temperature != 1.0:
+    """Sample a single next token from given logits of shape (B, vocab_size). Returns (B, 1)."""
+    assert temperature >= 0.0, "temperature must be non-negative"
+    if temperature == 0.0:
+        return torch.argmax(logits, dim=-1, keepdim=True)
+    if top_k is not None and top_k > 0:
+        k = min(top_k, logits.size(-1))
+        vals, idx = torch.topk(logits, k, dim=-1)
+        vals = vals / temperature
+        probs = F.softmax(vals, dim=-1)
+        choice = torch.multinomial(probs, num_samples=1, generator=rng)
+        return idx.gather(1, choice)
+    else:
         logits = logits / temperature
-    if top_k is not None:
-        top_k = min(top_k, logits.size(-1))  # safety check
-        values, _ = torch.topk(logits, top_k)
-        min_top_k = values[:, -1].unsqueeze(-1)
-        logits = torch.where(logits < min_top_k, torch.full_like(logits, float("-inf")), logits)
-    probs = F.softmax(logits, dim=-1)
-    next_ids = torch.multinomial(probs, num_samples=1, generator=rng).squeeze(1)
-    return next_ids
+        probs = F.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1, generator=rng)
 
 
 class RowState:
