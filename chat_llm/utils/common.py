@@ -41,7 +41,7 @@ def format_with_commas(n: int) -> str:
     return f"{n:,}"
 
 
-def print_master(s: str = "", type: str = "", *args):
+def print_master(s: str = "", type: str = "info", *args):
     if torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
     else:
@@ -49,7 +49,7 @@ def print_master(s: str = "", type: str = "", *args):
 
     if rank == 0:
         if type == "info":
-            rich.print(f"[blue]{s}[/blue]", *args)
+            rich.print(f"[blue][info] {s}[/blue]", *args)
         elif type == "error":
             rich.print(f"[red][error] {s}[/red]", *args)
         elif type == "success":

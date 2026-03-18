@@ -125,7 +125,7 @@ class GenerateEngine:
         seed=42,
     ):
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "Tokens should be a list of integers"
-        device = model.device
+        device = self.model.device
 
         dtype = (
             torch.bfloat16

@@ -3,10 +3,12 @@
 source "$(dirname "$0")/env.sh"
 
 export OMP_NUM_THREADS=1
-RUNNING_NAME = "pre_train_24L_9.5x"  # for logging and checkpoint naming
+
+NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+RUNNING_NAME="pre_train_24L_9.5x"  # for logging and checkpoint naming
 
 
-torchrun --standalone --nproc_per_node=2 -m \
+torchrun --standalone --nproc_per_node=$NUM_GPUS -m \
     trainer.pre_train -- \
     --running_name=$RUNNING_NAME \
     --depth=24 \

@@ -105,8 +105,8 @@ def main(**kwargs):
     get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 
     # WanDB setup (only on master process)
-    if master_process:
-        wandb_run = wandb.init(project="chat-llm", name=config.running_name, config=asdict(config))
+    # if master_process:
+    #     wandb_run = wandb.init(project="chat-llm", name=config.running_name, config=asdict(config))
 
     # Get Tokenizer
     tokenizer = get_tokenizer(TOKENIZER_DIR)
@@ -222,7 +222,7 @@ def main(**kwargs):
         resume_state_dict=dataloader_resume_state_dict,
     )
     build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
-        tokenizer, config.device_batch_size, config.max_seq_len, split="val", device=device
+        DATA_DIR, tokenizer, config.device_batch_size, config.max_seq_len, split="val", device=device
     )
 
     # Start training loop
@@ -256,16 +256,17 @@ def main(**kwargs):
             eval_steps = config.eval_tokens // (
                 config.device_batch_size * config.max_seq_len * ddp_world_size
             )
+            print_master(f"Evaluating at step {step:,}... Eval steps: {format_with_commas(eval_steps)}")
             val_bpb = evaluate_bpb(compiled_model, val_loader, eval_steps, token_bytes)
 
             print_master(f"Step {step:,} | Validation bpb: {val_bpb:.4f}")
 
-            wandb_run.log(
-                {
-                    "step": step,
-                    "val/bpb": val_bpb,
-                }
-            )
+            # wandb_run.log(
+            #     {
+            #         "step": step,
+            #         "val/bpb": val_bpb,
+            #     }
+            # )
 
             from chat_llm.engine import GenerateEngine
             from chat_llm.eval import sample_prompts
@@ -314,15 +315,15 @@ def main(**kwargs):
             print_master(
                 f"Step {step:,} | Loss: {train_loss:.4f} | LR: {current_lr:.2e}  | Time: {dt:.2f}s | Max Mem: {format_with_commas(get_max_memory())} bytes"
             )
-            wandb.log(
-                {
-                    "train/loss": train_loss,
-                    "train/lr": current_lr,
-                    "train/step_time": dt,
-                    "train/max_memory_bytes": get_max_memory(),
-                },
-                step=step,
-            )
+            # wandb.log(
+            #     {
+            #         "train/loss": train_loss,
+            #         "train/lr": current_lr,
+            #         "train/step_time": dt,
+            #         "train/max_memory_bytes": get_max_memory(),
+            #     },
+            #     step=step,
+            # )
 
         step += 1
 
@@ -340,7 +341,7 @@ def main(**kwargs):
             results[f"core/{task_name}_{metric_name}"] = metric_value
 
     # Cleanup
-    wandb_run.finish()
+    # wandb_run.finish()
     if ddp:
         clean_dist()
 
