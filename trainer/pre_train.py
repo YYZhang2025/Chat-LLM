@@ -250,7 +250,7 @@ def main(**kwargs):
         last_step = step == config.num_iterations
 
         # Evaluation
-        if config.eval_every > 0 and step % config.eval_every == 0:
+        if config.eval_every > 0 and (step + 1) % config.eval_every == 0:
             compiled_model.eval()
             val_loader = build_val_loader()
             eval_steps = config.eval_tokens // (
