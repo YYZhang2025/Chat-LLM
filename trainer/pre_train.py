@@ -328,6 +328,16 @@ def main(**kwargs):
 
     # Evaluate final model on CORE metric\
     compiled_model.eval()
+    from chat_llm.eval import evaluate_core
+
+    results = {}
+    resutls = evaluate_core(compiled_model, tokenizer, config.core_metric_max_per_task)
+    print_master("CORE evaluation results:")
+    for task_name, task_results in resutls.items():
+        print_master(f"Task: {task_name}", type="info")
+        for metric_name, metric_value in task_results.items():
+            print_master(f"{metric_name}: {metric_value:.4f}", type="info")
+            results[f"core/{task_name}_{metric_name}"] = metric_value
 
     # Cleanup
     wandb_run.finish()
