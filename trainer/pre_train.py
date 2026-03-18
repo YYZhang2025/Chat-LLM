@@ -174,7 +174,7 @@ def main(**kwargs):
         else get_target_batch_size(num_scaling_params, targets_tokens_nums, D_REF, B_REF)
     )
 
-    token_bytes = get_token_bytes(device=device)
+    token_bytes = get_token_bytes()
 
     batch_lr_scale = 1.0
     batch_ratio = total_batch_size / B_REF
@@ -243,7 +243,8 @@ def main(**kwargs):
 
     # Clean up any existing memory allocations before starting the training loop, to ensure we have an accurate measurement of memory usage during the training loop and to avoid any OOM issues caused by fragmentation from the initial model building and data loading steps.
 
-    torch.cuda.empty_cache() if device_type == "cuda" else None
+    print(device)
+    # torch.cuda.empty_cache() if device_type == "cuda" else None
 
     x, y, dataloader_state_dict = next(train_loader)
 

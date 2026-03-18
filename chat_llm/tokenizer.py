@@ -1,9 +1,12 @@
 import os
 
+import torch
 from tokenizers import Regex, decoders, pre_tokenizers
 from tokenizers import Tokenizer as HFTokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
+
+from chat_llm.utils.common import get_base_dir
 
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
@@ -144,10 +147,6 @@ def get_tokenizer(tokenizer_dir):
 
 
 def get_token_bytes(device="cpu"):
-    import torch
-
-    from chat_llm.utils.common import get_base_dir
-
     TOKENIZER_DIR = os.environ.get("TOKENIZER_DIR", os.path.join(get_base_dir(), "tokenizer"))
     token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
     assert os.path.exists(token_bytes_path), (
