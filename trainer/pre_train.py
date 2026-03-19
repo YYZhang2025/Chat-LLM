@@ -245,12 +245,15 @@ def main(**kwargs):
             val_bpb = evaluate_bpb(compiled_model, val_loader, eval_steps, token_bytes)
             print_master(f"Step {step:,} | Validation bpb: {val_bpb:.4f}")
 
-            wandb_run.log(
-                {
-                    "val/bpb": val_bpb,
-                },
-                step=step,
-            )
+            if master_process:
+                wandb_run.log(
+                    {
+                        "val/bpb": val_bpb,
+                    },
+                    step=step,
+                )
+
+            compiled_model.train()
 
         # Save checkpoint
         if config.save_every > 0 and (step + 1) % config.save_every == 0:
