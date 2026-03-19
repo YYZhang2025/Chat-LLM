@@ -14,9 +14,17 @@ from chat_llm.dataloader import (
     tokenizing_distributed_data_loader_bos_bestfit,
     tokenizing_distributed_data_loader_with_state_bos_bestfit,
 )
-from chat_llm.eval import evaluate_bpb
-from chat_llm.model.llm import LLMModel, ModelConfig
+from chat_llm.engine import GenerateEngine, sample_prompts
+from chat_llm.eval.eval_common import evaluate_bpb
+from chat_llm.eval.eval_core import evaluate_core
+from chat_llm.model.llm import build_model_meta
 from chat_llm.optim import optimizer_step, set_optimizer, update_optimizer_state
+from chat_llm.scaling_law import (
+    get_num_scaling_params,
+    get_target_batch_size,
+    get_target_tokens_num,
+    get_target_weight_decay,
+)
 from chat_llm.tokenizer import get_token_bytes, get_tokenizer
 from chat_llm.utils.checkpoint import save_checkpoint
 from chat_llm.utils.common import (
@@ -33,25 +41,27 @@ from chat_llm.utils.dist import clean_dist, dist_init
 class Config:
     running_name: str = ""
     device_type: str = "cuda"
+
     # Model hyperparameters
     depth: int = 20
-    aspect_ratio: int = 64
+    aspect_ratio: int = 64  # use to determine model width
     head_dim: int = 128
     max_seq_len: int = 2048
     window_pattern: str = "SSSL"
 
     num_iterations: int = -1
     target_flops: float = -1.0
-    target_param_data_ratio: float = 10.5
+    target_param_data_ratio: float = 10.5  # tokens / parameter
     device_batch_size: int = 32
     total_batch_size: int = -1
 
     # Optimizer hyperparameters
     embedding_lr: float = 0.3
     unembedding_lr: float = 0.008
-    weight_decay: float = 0.28
     matrix_lr: float = 0.02
     scalar_lr: float = 0.5
+    weight_decay: float = 0.28
+
     warmup_steps: int = 40
     warmdown_ratio: float = 0.65
     final_lr_frac: float = 0.05
@@ -68,25 +78,15 @@ class Config:
     compiled: bool = True
 
 
-def build_model_meta(depth, aspect_ratio, head_dim, vocab_size, max_seq_len, window_pattern):
-    """
-    Build the model on the meta device to get accurate parameter counts without using any real memory, which is important for being able to build large models without OOM issues and to compute accurate scaling law predictions for hyperparameters based on the actual parameter count of the model that will be trained.
-    """
-    base_dim = depth * aspect_ratio
-    model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
-    num_heads = model_dim // head_dim
-    config = ModelConfig(
-        embed_dim=model_dim,
-        n_q_heads=num_heads,
-        n_kv_heads=num_heads,
-        vocab_size=vocab_size,
-        max_seq_len=max_seq_len,
-        d_ff=4 * model_dim,
-        window_pattern=window_pattern,
-    )
-    with torch.device("meta"):
-        model_meta = LLMModel(config)
-    return model_meta
+prompts_sample = [
+    "The capital of France is",
+    "The chemical symbol of gold is",
+    "If yesterday was Friday, then tomorrow will be",
+    "The opposite of hot is",
+    "The planets of the solar system are:",
+    "My favorite color is",
+    "If 5*x + 3 = 13, then x is",
+]
 
 
 def main(**kwargs):
@@ -106,15 +106,15 @@ def main(**kwargs):
     get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 
     # WanDB setup (only on master process)
-    # if master_process:
-    #     wandb_run = wandb.init(project="chat-llm", name=config.running_name, config=asdict(config))
+    if master_process:
+        wandb_run = wandb.init(project="chat-llm", name=config.running_name, config=asdict(config))
 
     # Get Tokenizer
     tokenizer = get_tokenizer(TOKENIZER_DIR)
     vocab_size = tokenizer.get_vocab_size()
     print_master(f"Vocab size: {vocab_size:,}")
 
-    # Build model on CPU first to avoid any GPU memory fragmentation issues. We will move it to the target device later.
+    # Build model
     model = build_model_meta(
         depth=config.depth,
         aspect_ratio=config.aspect_ratio,
@@ -123,37 +123,19 @@ def main(**kwargs):
         max_seq_len=config.max_seq_len,
         window_pattern=config.window_pattern,
     )
-    model.to_empty(
-        device=device
-    )  # 2) All tensors get storage on target device but with uninitialized (garbage) data
-
+    model.to_empty(device=device)
     model.init_weights()
     print_master(
         f"Model built with {format_with_commas(sum(p.numel() for p in model.parameters()))} parameters."
     )
-
-    orig_model = model  # This  will point to the same model object throughout, even if we later wrap it in DDP or compile it, which makes it easier to save checkpoints without worrying about unwrapping or tracking multiple references to the model object.
+    orig_model = model
     compiled_model = torch.compile(model, dynamic=False) if config.compiled else model
 
-    prompts = [
-        "The capital of France is",
-        "The chemical symbol of gold is",
-        "If yesterday was Friday, then tomorrow will be",
-        "The opposite of hot is",
-        "The planets of the solar system are:",
-        "My favorite color is",
-        "If 5*x + 3 = 13, then x is",
-    ]
-
-    from chat_llm.scaling_law import (
-        get_num_scaling_params,
-        get_target_batch_size,
-        get_target_tokens_num,
-        get_target_weight_decay,
-    )
-
+    # Compute training setup based on scaling laws
     num_scaling_params = get_num_scaling_params(orig_model)
+    # tokens processed per forward+backward pass per GPU
     tokens_per_fwdbwd = config.device_batch_size * config.max_seq_len
+
     targets_tokens_nums = get_target_tokens_num(num_scaling_params, config.target_param_data_ratio)
     d12_ref = build_model_meta(
         depth=12,
@@ -239,43 +221,20 @@ def main(**kwargs):
             "Tokens per micro-batch": world_tokens_per_fwdbwd,
             "Total batch size": total_batch_size,
             "Gradient accumulation steps": grad_accum_steps,
+            # "Total steps": config.num_iterations,
         }
     )
 
     # Clean up any existing memory allocations before starting the training loop, to ensure we have an accurate measurement of memory usage during the training loop and to avoid any OOM issues caused by fragmentation from the initial model building and data loading steps.
 
-    print(device)
-    # torch.cuda.empty_cache() if device_type == "cuda" else None
+    torch.cuda.empty_cache() if device_type == "cuda" else None
 
     x, y, dataloader_state_dict = next(train_loader)
-
-    compiled_model.eval()
-    from chat_llm.eval import evaluate_core
-
-    # results = {}
-    # resutls = evaluate_core(orig_model, tokenizer, device, config.core_metric_max_per_task)
-    # print_master("CORE evaluation results:")
-    # if master_process:
-    #     print("\n=== CORE Results ===")
-    #     print(f"CORE Metric: {resutls['core_metric']:.4f}\n")
-
-    #     print("Per-task accuracy:")
-    #     for task, acc in sorted(resutls["results"].items()):
-    #         print(f"  {task:30s}  acc={acc:.4f}")
-
-    #     print("\nPer-task centered results:")
-    #     for task, val in sorted(resutls["centered_results"].items()):
-    #         print(f"  {task:30s}  centered={val:.4f}")
-    # for task_name, task_results in resutls.items():
-    #     print_master(f"Task: {task_name}", type="info")
-    #     for metric_name, metric_value in task_results.items():
-    #         print_master(f"{metric_name}: {metric_value:.4f}", type="info")
-    #         results[f"core/{task_name}_{metric_name}"] = metric_value
 
     while True:
         last_step = step == config.num_iterations
 
-        # Evaluation
+        # Evaluation loss on the validation set (in bits per byte, bpb)
         if config.eval_every > 0 and (step + 1) % config.eval_every == 0:
             compiled_model.eval()
             val_loader = build_val_loader()
@@ -284,16 +243,17 @@ def main(**kwargs):
             )
             print_master(f"Evaluating at step {step:,}... Eval steps: {format_with_commas(eval_steps)}")
             val_bpb = evaluate_bpb(compiled_model, val_loader, eval_steps, token_bytes)
-
             print_master(f"Step {step:,} | Validation bpb: {val_bpb:.4f}")
 
-            # wandb_run.log(
-            #     {
-            #         "step": step,
-            #         "val/bpb": val_bpb,
-            #     }
-            # )
+            wandb_run.log(
+                {
+                    "val/bpb": val_bpb,
+                },
+                step=step,
+            )
 
+        # Save checkpoint
+        if config.save_every > 0 and (step + 1) % config.save_every == 0:
             save_checkpoint(
                 MODEL_DIR,
                 step,
@@ -303,19 +263,18 @@ def main(**kwargs):
                 rank=ddp_rank,
             )
 
-        from chat_llm.engine import GenerateEngine
-        from chat_llm.eval import sample_prompts
+            print_master(f"Checkpoint saved at step {step:,}")
 
-        # if master_process:
-        #     compiled_model.eval()
-        #     engine = GenerateEngine(orig_model, tokenizer)
-        #     results = sample_prompts(prompts, engine)
-        #     print_master("Sample generations:")
-        #     for i, generated in enumerate(results):
-        #         print_master(f"Sample {i + 1}:", type="info")
-        #         print_master(f"Generation: {generated}", type="info")
+        if master_process and config.sample_every > 0 and (step + 1) % config.sample_every == 0:
+            compiled_model.eval()
+            engine = GenerateEngine(orig_model, tokenizer)
+            print_master("Sampling prompts...", type="info")
+            results = sample_prompts(prompts_sample, engine)
+            for i, generated in enumerate(results):
+                print_master(f"Sample {i + 1}:", type="info")
+                print_master(f"Generation: {generated}", type="info")
 
-        #     compiled_model.train()
+            compiled_model.train()
 
         # Training step
         if last_step:
@@ -323,9 +282,11 @@ def main(**kwargs):
 
         synchronize()  # make sure all data is ready
         t0 = time.time()
-        for micro_step in range(grad_accum_steps):
+        micro_losses = []
+        for _ in range(grad_accum_steps):
             loss = compiled_model(x, y)
             train_loss = loss.item()
+            micro_losses.append(train_loss)
             loss = loss / grad_accum_steps
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -345,27 +306,62 @@ def main(**kwargs):
 
         # Logging
         if master_process:
+            train_loss = sum(micro_losses) / len(micro_losses)
             current_lr = optimizer.param_groups[0]["lr"]
+            max_memory_bytes = get_max_memory()
+            max_memory_gb = max_memory_bytes / (1024**3)
+            tokens_this_step = total_batch_size
+            tokens_seen = (step + 1) * total_batch_size
+            throughput_tokens_per_sec = tokens_this_step / max(dt, 1e-12)
 
             print_master(
-                f"Step {step:,} | Loss: {train_loss:.4f} | LR: {current_lr:.2e}  | Time: {dt:.2f}s | Max Mem: {format_with_commas(get_max_memory())} bytes"
+                f"Step {step:,} | Loss: {train_loss:.4f} | LR: {current_lr:.2e}  | Time: {dt:.2f}s | Throughput: {format_with_commas(int(throughput_tokens_per_sec))} tokens/s | Max Memory: {max_memory_gb:.2f} GB",
+                type="info",
             )
-            # wandb.log(
-            #     {
-            #         "train/loss": train_loss,
-            #         "train/lr": current_lr,
-            #         "train/step_time": dt,
-            #         "train/max_memory_bytes": get_max_memory(),
-            #     },
-            #     step=step,
-            # )
+            wandb.log(
+                {
+                    "train/loss": train_loss,
+                    "train/lr": current_lr,
+                    "train/step_time_sec": dt,
+                    "train/max_memory_bytes": max_memory_bytes,
+                    "train/max_memory_gb": max_memory_gb,
+                    "train/throughput_tokens_per_sec": throughput_tokens_per_sec,
+                    "train/tokens_this_step": tokens_this_step,
+                    "train/tokens_seen": tokens_seen,
+                    "train/grad_accum_steps": grad_accum_steps,
+                    "train/batch_lr_scale": batch_lr_scale,
+                    "train/weight_decay_scaled": weight_decay_scaled,
+                },
+                step=step,
+            )
 
         step += 1
 
     # Evaluate final model on CORE metric\
+    results = {}
+    compiled_model.eval()
+    resutls = evaluate_core(orig_model, tokenizer, device, config.core_metric_max_per_task)
+    print_master("CORE evaluation results:")
+    if master_process:
+        print("\n=== CORE Results ===")
+        print(f"CORE Metric: {resutls['core_metric']:.4f}\n")
+
+        print("Per-task accuracy:")
+        for task, acc in sorted(resutls["results"].items()):
+            print(f"  {task:30s}  acc={acc:.4f}")
+
+        print("\nPer-task centered results:")
+        for task, val in sorted(resutls["centered_results"].items()):
+            print(f"  {task:30s}  centered={val:.4f}")
+    for task_name, task_results in resutls.items():
+        print_master(f"Task: {task_name}", type="info")
+        for metric_name, metric_value in task_results.items():
+            print_master(f"{metric_name}: {metric_value:.4f}", type="info")
+            results[f"core/{task_name}_{metric_name}"] = metric_value
 
     # Cleanup
-    # wandb_run.finish()
+    if master_process:
+        wandb_run.finish()
     if ddp:
         clean_dist()
 

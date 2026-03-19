@@ -146,7 +146,7 @@ def get_tokenizer(tokenizer_dir):
     return HuggingFaceTokenizer.from_directory(tokenizer_dir)
 
 
-def get_token_bytes(device="cpu"):
+def get_token_bytes(device: str | torch.device = "cpu"):
     TOKENIZER_DIR = os.environ.get("TOKENIZER_DIR", os.path.join(get_base_dir(), "tokenizer"))
     token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
     assert os.path.exists(token_bytes_path), (

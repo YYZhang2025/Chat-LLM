@@ -372,3 +372,24 @@ if __name__ == "__main__":
 
     print("Model parameter count:", sum(p.numel() for p in model.parameters()))
     print_master("Model initialized successfully")
+
+
+def build_model_meta(depth, aspect_ratio, head_dim, vocab_size, max_seq_len, window_pattern):
+    """
+    Build the model on the meta device to get accurate parameter counts without using any real memory, which is important for being able to build large models without OOM issues and to compute accurate scaling law predictions for hyperparameters based on the actual parameter count of the model that will be trained.
+    """
+    base_dim = depth * aspect_ratio
+    model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
+    num_heads = model_dim // head_dim
+    config = ModelConfig(
+        embed_dim=model_dim,
+        n_q_heads=num_heads,
+        n_kv_heads=num_heads,
+        vocab_size=vocab_size,
+        max_seq_len=max_seq_len,
+        d_ff=4 * model_dim,
+        window_pattern=window_pattern,
+    )
+    with torch.device("meta"):
+        model_meta = LLMModel(config)
+    return model_meta
