@@ -17,6 +17,7 @@ import torch.distributed as dist
 import yaml
 from jinja2 import Template
 
+from chat_llm.engine import GenerateEngine
 from chat_llm.utils.common import download_file_with_lock, get_base_dir, print_master
 
 
@@ -375,6 +376,7 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
     # Evaluate each task
     results = {}
     centered_results = {}
+    print_master(f"Evaluating on {len(tasks)} tasks...")
     for task in tasks:
         start_time = time.time()
         label = task["label"]
@@ -410,9 +412,6 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
     core_metric = sum(centered_results.values()) / len(centered_results)
     out = {"results": results, "centered_results": centered_results, "core_metric": core_metric}
     return out
-
-
-from chat_llm.engine import GenerateEngine
 
 
 @torch.inference_mode()

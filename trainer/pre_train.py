@@ -18,6 +18,7 @@ from chat_llm.eval import evaluate_bpb
 from chat_llm.model.llm import LLMModel, ModelConfig
 from chat_llm.optim import optimizer_step, set_optimizer, update_optimizer_state
 from chat_llm.tokenizer import get_token_bytes, get_tokenizer
+from chat_llm.utils.checkpoint import save_checkpoint
 from chat_llm.utils.common import (
     COMPUTE_DTYPE,
     autodetect_device_type,
@@ -57,7 +58,7 @@ class Config:
 
     # Checkpointing and evaluation
     resume_from_step: int = -1
-    eval_every: int = 250
+    eval_every: int = 10
     eval_tokens: int = 80 * 524288
     core_metric_every: int = 2000
     core_metric_max_per_task: int = 500
@@ -174,7 +175,7 @@ def main(**kwargs):
         else get_target_batch_size(num_scaling_params, targets_tokens_nums, D_REF, B_REF)
     )
 
-    token_bytes = get_token_bytes()
+    token_bytes = get_token_bytes(device=device)
 
     batch_lr_scale = 1.0
     batch_ratio = total_batch_size / B_REF
@@ -251,14 +252,25 @@ def main(**kwargs):
     compiled_model.eval()
     from chat_llm.eval import evaluate_core
 
-    results = {}
-    resutls = evaluate_core(compiled_model, tokenizer, config.core_metric_max_per_task)
-    print_master("CORE evaluation results:")
-    for task_name, task_results in resutls.items():
-        print_master(f"Task: {task_name}", type="info")
-        for metric_name, metric_value in task_results.items():
-            print_master(f"{metric_name}: {metric_value:.4f}", type="info")
-            results[f"core/{task_name}_{metric_name}"] = metric_value
+    # results = {}
+    # resutls = evaluate_core(orig_model, tokenizer, device, config.core_metric_max_per_task)
+    # print_master("CORE evaluation results:")
+    # if master_process:
+    #     print("\n=== CORE Results ===")
+    #     print(f"CORE Metric: {resutls['core_metric']:.4f}\n")
+
+    #     print("Per-task accuracy:")
+    #     for task, acc in sorted(resutls["results"].items()):
+    #         print(f"  {task:30s}  acc={acc:.4f}")
+
+    #     print("\nPer-task centered results:")
+    #     for task, val in sorted(resutls["centered_results"].items()):
+    #         print(f"  {task:30s}  centered={val:.4f}")
+    # for task_name, task_results in resutls.items():
+    #     print_master(f"Task: {task_name}", type="info")
+    #     for metric_name, metric_value in task_results.items():
+    #         print_master(f"{metric_name}: {metric_value:.4f}", type="info")
+    #         results[f"core/{task_name}_{metric_name}"] = metric_value
 
     while True:
         last_step = step == config.num_iterations
@@ -281,6 +293,15 @@ def main(**kwargs):
             #         "val/bpb": val_bpb,
             #     }
             # )
+
+            save_checkpoint(
+                MODEL_DIR,
+                step,
+                orig_model.state_dict(),  # model parameters
+                optimizer.state_dict(),  # optimizer state
+                {},
+                rank=ddp_rank,
+            )
 
         from chat_llm.engine import GenerateEngine
         from chat_llm.eval import sample_prompts

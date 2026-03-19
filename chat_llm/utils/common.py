@@ -41,7 +41,7 @@ def format_with_commas(n: int) -> str:
     return f"{n:,}"
 
 
-def print_master(s: str = "", type: str = "info", *args):
+def print_master(s: str = "", type: str = "info", **kwargs):
     if torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
     else:
@@ -49,13 +49,13 @@ def print_master(s: str = "", type: str = "info", *args):
 
     if rank == 0:
         if type == "info":
-            rich.print(f"[blue][info] {s}[/blue]", *args)
+            rich.print(f"[blue][info] {s}[/blue]", **kwargs)
         elif type == "error":
-            rich.print(f"[red][error] {s}[/red]", *args)
+            rich.print(f"[red][error] {s}[/red]", **kwargs)
         elif type == "success":
-            rich.print(f"[green][success] {s}[/green]", *args)
+            rich.print(f"[green][success] {s}[/green]", **kwargs)
         else:
-            rich.print(s, *args)
+            rich.print(s, **kwargs)
 
 
 def print_dict_master(d: dict, title: str = "Training Config"):
