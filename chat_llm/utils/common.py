@@ -78,13 +78,13 @@ def print_dict_master(d: dict, title: str = "Training Config"):
 def get_base_dir():
     # co-locate chat-llm intermediates with other cached data in ~/.cache (by default)
     if os.environ.get("CHAT_LLM_BASE_DIR"):
-        nanochat_dir = os.environ.get("CHAT_LLM_BASE_DIR")
+        base_dir = os.environ.get("CHAT_LLM_BASE_DIR")
     else:
         home_dir = os.path.expanduser("~")
         cache_dir = os.path.join(home_dir, ".cache")
-        nanochat_dir = os.path.join(cache_dir, "chat-llm")
-    os.makedirs(nanochat_dir, exist_ok=True)
-    return nanochat_dir
+        base_dir = os.path.join(cache_dir, "chat-llm")
+    os.makedirs(base_dir, exist_ok=True)
+    return base_dir
 
 
 def download_file_with_lock(url, filename, postprocess_fn=None):
@@ -120,3 +120,55 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
         # Run the postprocess function if provided
         if postprocess_fn is not None:
             postprocess_fn(file_path)
+
+
+def get_peak_flops(device_name: str) -> float:
+    name = device_name.lower()
+
+    # Table order matters: more specific patterns first.
+    _PEAK_FLOPS_TABLE = (
+        # NVIDIA Blackwell
+        (["gb200"], 2.5e15),
+        (["grace blackwell"], 2.5e15),
+        (["b200"], 2.25e15),
+        (["b100"], 1.8e15),
+        # NVIDIA Hopper
+        (["h200", "nvl"], 836e12),
+        (["h200", "pcie"], 836e12),
+        (["h200"], 989e12),
+        (["h100", "nvl"], 835e12),
+        (["h100", "pcie"], 756e12),
+        (["h100"], 989e12),
+        (["h800", "nvl"], 989e12),
+        (["h800"], 756e12),
+        # NVIDIA Ampere data center
+        (["a100"], 312e12),
+        (["a800"], 312e12),
+        (["a40"], 149.7e12),
+        (["a30"], 165e12),
+        # NVIDIA Ada data center
+        (["l40s"], 362e12),
+        (["l40-s"], 362e12),
+        (["l40 s"], 362e12),
+        (["l4"], 121e12),
+        # AMD CDNA accelerators
+        (["mi355"], 2.5e15),
+        (["mi325"], 1.3074e15),
+        (["mi300x"], 1.3074e15),
+        (["mi300a"], 980.6e12),
+        (["mi250x"], 383e12),
+        (["mi250"], 362.1e12),
+        # Consumer RTX
+        (["5090"], 209.5e12),
+        (["4090"], 165.2e12),
+        (["3090"], 71e12),
+    )
+    for patterns, flops in _PEAK_FLOPS_TABLE:
+        if all(p in name for p in patterns):
+            return flops
+    if "data center gpu max 1550" in name:
+        # Ponte Vecchio (PVC) - dynamic based on compute units
+        max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
+        return 512 * max_comp_units * 1300 * 10**6
+
+    return float("inf")

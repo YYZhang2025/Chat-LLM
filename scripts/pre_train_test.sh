@@ -15,12 +15,9 @@ RUNNING_NAME="pre_train_24L_9.5x"  # for logging and checkpoint naming
 torchrun --standalone --nproc_per_node=2 -m \
     trainer.pre_train -- \
     --running_name=$RUNNING_NAME \
-    --depth=4 \
     --aspect_ratio=16 \
-    --head_dim=32 \
     --max_seq_len=128 \
     --device_batch_size=2 \
-    --total_batch_size=256 \
     --num_iterations=3 \
     --eval_every=2 \
     --eval_tokens=1024 \

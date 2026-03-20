@@ -17,7 +17,7 @@ from chat_llm.dataloader import (
 from chat_llm.engine import GenerateEngine, sample_prompts
 from chat_llm.eval.eval_common import evaluate_bpb
 from chat_llm.eval.eval_core import evaluate_core
-from chat_llm.model.llm import build_model_meta
+from chat_llm.model.llm import build_model_meta, estimate_flops
 from chat_llm.optim import optimizer_step, set_optimizer, update_optimizer_state
 from chat_llm.scaling_law import (
     get_num_scaling_params,
@@ -31,6 +31,7 @@ from chat_llm.utils.common import (
     COMPUTE_DTYPE,
     autodetect_device_type,
     format_with_commas,
+    get_peak_flops,
     print_dict_master,
     print_master,
 )
@@ -104,6 +105,10 @@ def main(**kwargs):
     master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
     synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
     get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
+    if device_type == "cuda":
+        gpu_device_name = torch.cuda.get_device_name(0)
+        peak_flops = get_peak_flops(gpu_device_name)
+        print_master(f"Detected CUDA device. Peak FLOPs: {format_with_commas(peak_flops)}")
 
     # WanDB setup (only on master process)
     if master_process:
@@ -215,24 +220,27 @@ def main(**kwargs):
     world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
     grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
 
+    num_flops_per_token = estimate_flops(orig_model)
+    num_iterations = round(config.target_flops / (num_flops_per_token * total_batch_size))
+
+    # Clean up any existing memory allocations before starting the training loop, to ensure we have an accurate measurement of memory usage during the training loop and to avoid any OOM issues caused by fragmentation from the initial model building and data loading steps.
+
     print_dict_master(
         {
             "Tokens per micro-batch per rank": tokens_per_fwdbwd,
             "Tokens per micro-batch": world_tokens_per_fwdbwd,
             "Total batch size": total_batch_size,
             "Gradient accumulation steps": grad_accum_steps,
-            # "Total steps": config.num_iterations,
+            "Total steps": num_iterations,
         }
     )
-
-    # Clean up any existing memory allocations before starting the training loop, to ensure we have an accurate measurement of memory usage during the training loop and to avoid any OOM issues caused by fragmentation from the initial model building and data loading steps.
 
     torch.cuda.empty_cache() if device_type == "cuda" else None
 
     x, y, dataloader_state_dict = next(train_loader)
 
     while True:
-        last_step = step == config.num_iterations
+        last_step = step == num_iterations
 
         # Evaluation loss on the validation set (in bits per byte, bpb)
         if config.eval_every > 0 and (step + 1) % config.eval_every == 0:
@@ -317,8 +325,11 @@ def main(**kwargs):
             tokens_seen = (step + 1) * total_batch_size
             throughput_tokens_per_sec = tokens_this_step / max(dt, 1e-12)
 
+            flops_per_sec = num_flops_per_token * total_batch_size / dt
+            mfu = 100 * flops_per_sec / (peak_flops * ddp_world_size)
+
             print_master(
-                f"Step {step:,} | Loss: {train_loss:.4f} | LR: {current_lr:.2e}  | Time: {dt:.2f}s | Throughput: {format_with_commas(int(throughput_tokens_per_sec))} tokens/s | Max Memory: {max_memory_gb:.2f} GB",
+                f"Step {step:,} | Loss: {train_loss:.4f} | LR: {current_lr:.2e}  | Time: {dt:.2f}s | Throughput: {format_with_commas(int(throughput_tokens_per_sec))} tokens/s | Max Memory: {max_memory_gb:.2f} GB | MFU: {mfu:.2f}%",
                 type="info",
             )
             wandb.log(
@@ -334,11 +345,13 @@ def main(**kwargs):
                     "train/grad_accum_steps": grad_accum_steps,
                     "train/batch_lr_scale": batch_lr_scale,
                     "train/weight_decay_scaled": weight_decay_scaled,
+                    "train/mfu": mfu,
                 },
                 step=step,
             )
 
         step += 1
+    # ---------- End of training loop ----------
 
     # Evaluate final model on CORE metric\
     results = {}
@@ -356,11 +369,13 @@ def main(**kwargs):
         print("\nPer-task centered results:")
         for task, val in sorted(resutls["centered_results"].items()):
             print(f"  {task:30s}  centered={val:.4f}")
-    for task_name, task_results in resutls.items():
-        print_master(f"Task: {task_name}", type="info")
-        for metric_name, metric_value in task_results.items():
-            print_master(f"{metric_name}: {metric_value:.4f}", type="info")
-            results[f"core/{task_name}_{metric_name}"] = metric_value
+        for task_name, task_results in resutls.items():
+            print_master(f"Task: {task_name}", type="info")
+            for metric_name, metric_value in task_results.items():
+                print_master(f"{metric_name}: {metric_value:.4f}", type="info")
+                results[f"core/{task_name}_{metric_name}"] = metric_value
+
+        wandb_run.log(results)
 
     # Cleanup
     if master_process:

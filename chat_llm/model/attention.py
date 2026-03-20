@@ -64,7 +64,7 @@ def _sdpa_attention(
     Tk = k.size(2)
     window = window_size[0]
 
-    if (window > 0 or window >= Tq) and Tq == Tk:
+    if (window < 0 or window >= Tq) and Tq == Tk:
         return F.scaled_dot_product_attention(
             q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True, enable_gqa=use_gqd
         )
@@ -72,8 +72,8 @@ def _sdpa_attention(
     if Tq == 1:
         if window >= 0 and window < Tk:
             start = max(0, Tk - (window + 1))
-            k = k[:, start:, :, :]
-            v = v[:, start:, :, :]
+            k = k[:, :, start:, :]
+            v = v[:, :, start:, :]
         return F.scaled_dot_product_attention(
             q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, enable_gqa=use_gqd
         )

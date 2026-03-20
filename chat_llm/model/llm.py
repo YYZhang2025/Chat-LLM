@@ -365,15 +365,6 @@ class LLMModel(nn.Module):
             yield token
 
 
-if __name__ == "__main__":
-    config = ModelConfig()
-    model = LLMModel(config)
-    model.init_weights()
-
-    print("Model parameter count:", sum(p.numel() for p in model.parameters()))
-    print_master("Model initialized successfully")
-
-
 def build_model_meta(depth, aspect_ratio, head_dim, vocab_size, max_seq_len, window_pattern):
     """
     Build the model on the meta device to get accurate parameter counts without using any real memory, which is important for being able to build large models without OOM issues and to compute accurate scaling law predictions for hyperparameters based on the actual parameter count of the model that will be trained.
@@ -393,3 +384,48 @@ def build_model_meta(depth, aspect_ratio, head_dim, vocab_size, max_seq_len, win
     with torch.device("meta"):
         model_meta = LLMModel(config)
     return model_meta
+
+
+def estimate_flops(model: LLMModel) -> int:
+    """
+    Return the estimated FLOPs per token for the model (forward + backward).
+    Each matmul weight parameter contributes 2 FLOPs (multiply *, accumulate +) in forward, and 2X that in backward => 2+4=6.
+    Cleanest explanation of this: https://medium.com/@dzmitrybahdanau/the-flops-calculus-of-language-model-training-3b19c1f025e4
+    On top of that, 12 * h * q * effective_seq_len accounts for key @ query matmul flops inside attention.
+    With sliding windows, effective_seq_len varies per layer (capped by window size).
+    Ref: https://arxiv.org/abs/2204.02311 (PaLM paper).
+    This is ~1% off from the exact formulas of Chinchilla paper, the difference is:
+    - Chinchilla counts the embedding layer as flops (? weird, it's just a lookup => we ignore)
+    - Chinchilla counts exp/sum/divide in attention softmax as flops (a little sus and very tiny => we ignore)
+    """
+    nparams = sum(p.numel() for p in model.parameters())
+    # Exclude non-matmul params: embeddings and per-layer scalars
+    value_embeds_numel = sum(ve.weight.numel() for ve in model.value_embeds.values())
+    nparams_exclude = (
+        model.transformer.wte.weight.numel()
+        + value_embeds_numel
+        + model.resid_lambdas.numel()
+        + model.x0_lambdas.numel()
+    )
+    h, q, t = (
+        model.config.n_q_heads,
+        model.config.embed_dim // model.config.n_q_heads,
+        model.config.max_seq_len,
+    )
+    # Sum attention FLOPs per layer, accounting for sliding window
+    attn_flops = 0
+    for window_size in model.window_sizes:
+        window = window_size[0]  # (left, right) tuple, we use left
+        effective_seq = t if window < 0 else min(window, t)
+        attn_flops += 12 * h * q * effective_seq
+    num_flops_per_token = 6 * (nparams - nparams_exclude) + attn_flops
+    return num_flops_per_token
+
+
+if __name__ == "__main__":
+    config = ModelConfig()
+    model = LLMModel(config)
+    model.init_weights()
+
+    print("Model parameter count:", sum(p.numel() for p in model.parameters()))
+    print_master("Model initialized successfully")
