@@ -176,27 +176,6 @@ def main(**kwargs):
     world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
     grad_accum_steps = config.total_batch_size // world_tokens_per_fwdbwd
 
-    # Set Optimizer
-    optimizer = set_optimizer(
-        orig_model,
-        un_embedding_lr=config.unembedding_lr * batch_lr_scale,
-        embedding_lr=config.embedding_lr * batch_lr_scale,
-        matrix_lr=config.matrix_lr * batch_lr_scale,
-        weight_decay=weight_decay_scaled,
-        scalar_lr=config.scalar_lr * batch_lr_scale,
-    )
-
-    optimizer_update = partial(
-        update_optimizer_state,
-        optimizer=optimizer,
-        warmup_steps=config.warmup_steps,
-        warmdown_ratio=config.warmdown_ratio,
-        num_iterations=config.num_iterations,
-        final_lr_frac=config.final_lr_frac,
-        weight_decay_scaled=weight_decay_scaled,
-    )
-    scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
-
     # Set Dataloader
     dataloader_resume_state_dict = None
 
@@ -221,7 +200,31 @@ def main(**kwargs):
     grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
 
     num_flops_per_token = estimate_flops(orig_model)
-    num_iterations = round(config.target_flops / (num_flops_per_token * total_batch_size))
+    # num_iterations = round(config.target_flops / (num_flops_per_token * total_batch_size))
+    num_iterations = (
+        config.num_iterations if config.num_iterations > 0 else targets_tokens_nums // total_batch_size
+    )
+
+    # Set Optimizer
+    optimizer = set_optimizer(
+        orig_model,
+        un_embedding_lr=config.unembedding_lr * batch_lr_scale,
+        embedding_lr=config.embedding_lr * batch_lr_scale,
+        matrix_lr=config.matrix_lr * batch_lr_scale,
+        weight_decay=weight_decay_scaled,
+        scalar_lr=config.scalar_lr * batch_lr_scale,
+    )
+
+    optimizer_update = partial(
+        update_optimizer_state,
+        optimizer=optimizer,
+        warmup_steps=config.warmup_steps,
+        warmdown_ratio=config.warmdown_ratio,
+        num_iterations=num_iterations,
+        final_lr_frac=config.final_lr_frac,
+        weight_decay_scaled=weight_decay_scaled,
+    )
+    scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 
     # Clean up any existing memory allocations before starting the training loop, to ensure we have an accurate measurement of memory usage during the training loop and to avoid any OOM issues caused by fragmentation from the initial model building and data loading steps.
 

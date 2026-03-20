@@ -24,6 +24,5 @@ torchrun --standalone --nproc_per_node=2 -m \
     --sample_every=2 \
     --core_metric_max_per_task=5 \
     --compiled=True \
-    --log_every=1
 
 

@@ -427,6 +427,18 @@ def optimizer_step(
         optimizer.step()
 
 
+# Momentum scheduler for Muon optimizer (warms up to 0.97 over the first 400 steps)
+def get_muon_momentum(it):
+    frac = min(it / 400, 1)
+    momentum = (1 - frac) * 0.85 + frac * 0.97
+    return momentum
+
+
+# Weight decay scheduler for Muon optimizer (cosine decay to zero over the course of training)
+def get_weight_decay(it, num_iterations, weight_decay_scaled):
+    return weight_decay_scaled * 0.5 * (1 + math.cos(math.pi * it / num_iterations))
+
+
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it, warmup_steps, warmdown_ratio, num_iterations, final_lr_frac):
     warmup_iters = warmup_steps
@@ -438,18 +450,6 @@ def get_lr_multiplier(it, warmup_steps, warmdown_ratio, num_iterations, final_lr
     else:
         progress = (num_iterations - it) / warmdown_iters
         return progress * 1.0 + (1 - progress) * final_lr_frac
-
-
-# Momentum scheduler for Muon optimizer (warms up to 0.97 over the first 400 steps)
-def get_muon_momentum(it):
-    frac = min(it / 400, 1)
-    momentum = (1 - frac) * 0.85 + frac * 0.97
-    return momentum
-
-
-# Weight decay scheduler for Muon optimizer (cosine decay to zero over the course of training)
-def get_weight_decay(it, num_iterations, weight_decay_scaled):
-    return weight_decay_scaled * 0.5 * (1 + math.cos(math.pi * it / num_iterations))
 
 
 def update_optimizer_state(
