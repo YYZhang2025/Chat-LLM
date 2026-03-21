@@ -69,12 +69,14 @@ class Config:
 
     # Checkpointing and evaluation
     resume_from_step: int = -1
-    eval_every: int = 10
-    eval_tokens: int = 80 * 524288
-    core_metric_every: int = 2000
-    core_metric_max_per_task: int = 500
+
+    eval_every: int = 100
     sample_every: int = 2000
+    core_metric_every: int = 2000
     save_every: int = -1
+
+    eval_tokens: int = 80 * 524288
+    core_metric_max_per_task: int = 500
 
     compiled: bool = True
 

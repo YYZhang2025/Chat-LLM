@@ -2,10 +2,10 @@ import math
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 
+from chat_llm.model.llm import LLMModel
 from chat_llm.utils.common import print_master
-from chat_llm.utils.dist import get_dist_info, is_ddp_initialized
+from chat_llm.utils.dist import is_ddp_initialized
 
 
 @torch.compile(dynamic=False, fullgraph=True)
@@ -207,17 +207,18 @@ class Optimizer(torch.optim.Optimizer):
             self._adamw_beta2_t.fill_(group["betas"][1])
             self._adamw_eps_t.fill_(group["eps"])
             self._adamw_wd_t.fill_(group["weight_decay"])
+
             adamw_step_fused(
-                p_slice,
-                grad_slice,
-                state["exp_avg"],
-                state["exp_avg_sq"],
-                self._adamw_step_t,
-                self._adamw_lr_t,
-                self._adamw_beta1_t,
-                self._adamw_beta2_t,
-                self._adamw_eps_t,
-                self._adamw_wd_t,
+                p=p_slice,
+                p_grad=grad_slice,
+                exp_avg=state["exp_avg"],
+                exp_avg_sq=state["exp_avg_sq"],
+                step_t=self._adamw_step_t,
+                lr_t=self._adamw_lr_t,
+                weight_decay=self._adamw_wd_t,
+                beta1_t=self._adamw_beta1_t,
+                beta2_t=self._adamw_beta2_t,
+                eps_t=self._adamw_eps_t,
             )
 
             # Large params need all_gather
@@ -259,17 +260,18 @@ class Optimizer(torch.optim.Optimizer):
             self._muon_beta2_t.fill_(group["beta2"])
             self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5)
             self._muon_wd_t.fill_(group["weight_decay"])
+
             muon_step_fused(
-                grad_chunk[:num_owned],
-                stacked_owned,
-                state["momentum_buffer"][:num_owned],
-                state["second_momentum_buffer"][:num_owned],
-                self._muon_momentum_t,
-                self._muon_lr_t,
-                self._muon_wd_t,
-                self._muon_beta2_t,
-                group["ns_steps"],
-                red_dim,
+                stacked_grads=grad_chunk[:num_owned],
+                stacked_params=stacked_owned,
+                momentum_buffer=state["momentum_buffer"][:num_owned],
+                second_momentum_buffer=state["second_momentum_buffer"][:num_owned],
+                momentum_t=self._muon_momentum_t,
+                lr_t=self._muon_lr_t,
+                wd_t=self._muon_wd_t,
+                beta2_t=self._muon_beta2_t,
+                ns_steps=group["ns_steps"],
+                red_dim=red_dim,
             )
             updated_params[:num_owned].copy_(stacked_owned)
 
@@ -319,9 +321,6 @@ class Optimizer(torch.optim.Optimizer):
 
         # Phase 3: wait for gathers, copy back
         self._finish_gathers(gather_list)
-
-
-from chat_llm.model.llm import LLMModel
 
 
 def set_optimizer(
