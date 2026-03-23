@@ -72,7 +72,7 @@ class Config:
     resume_from_step: int = -1
 
     eval_every: int = 100
-    sample_every: int = 2000
+    sample_every: int = 200
     core_metric_every: int = 2000
     save_every: int = -1
 
@@ -183,7 +183,7 @@ def main(**kwargs):
     # tokens processed per forward+backward pass per GPU
     tokens_per_fwdbwd = config.device_batch_size * config.max_seq_len
     world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
-    grad_accum_steps = config.total_batch_size // world_tokens_per_fwdbwd
+    grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
 
     # Set Dataloader
     dataloader_resume_state_dict = None
