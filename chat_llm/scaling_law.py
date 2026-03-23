@@ -1,12 +1,12 @@
+import math
+
+
 def get_target_tokens_num(num_params, target_param_data_ratio):
     # Given a number of model parameters and a target parameter-to-data ratio, return the target number of tokens to train on.
     return int(num_params * target_param_data_ratio)
 
 
-import math
-
-
-def get_target_batch_size(num_params, target_tokens, D_REF, B_REF):
+def get_target_batch_size(target_tokens, D_REF, B_REF):
     batch_size_ratio = target_tokens / D_REF
     predicted_batch_size = B_REF * batch_size_ratio**0.383
     total_batch_size = 2 ** round(math.log2(predicted_batch_size))

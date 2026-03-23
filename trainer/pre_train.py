@@ -104,7 +104,7 @@ def main(**kwargs):
 
     device_type = autodetect_device_type() if config.device_type == "" else config.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = dist_init(device_type)
-    master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
+    master_process = ddp_rank == 0  # master process will handle logging and checkpointing
     synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
     get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
     if device_type == "cuda":
@@ -140,8 +140,6 @@ def main(**kwargs):
 
     # Compute training setup based on scaling laws
     num_scaling_params = get_num_scaling_params(orig_model)
-    # tokens processed per forward+backward pass per GPU
-    tokens_per_fwdbwd = config.device_batch_size * config.max_seq_len
 
     targets_tokens_nums = get_target_tokens_num(num_scaling_params, config.target_param_data_ratio)
     d12_ref = build_model_meta(
@@ -153,19 +151,17 @@ def main(**kwargs):
         window_pattern=config.window_pattern,
     )  # creates the model on meta device
 
-    D_REF = (config.target_param_data_ratio) * get_num_scaling_params(
-        d12_ref
-    )  # compute-optimal d12 training horizon in tokens (measured empirically)
+    # compute-optimal d12 training horizon in tokens (measured empirically)
+    D_REF = (config.target_param_data_ratio) * get_num_scaling_params(d12_ref)
     B_REF = 2**19  # optimal batch size at d12 ~= 524,288 tokens (measured empirically)
 
     total_batch_size = (
         config.total_batch_size
         if config.total_batch_size > 0
-        else get_target_batch_size(num_scaling_params, targets_tokens_nums, D_REF, B_REF)
+        else get_target_batch_size(targets_tokens_nums, D_REF, B_REF)
     )
 
     token_bytes = get_token_bytes(device=device)
-
     batch_lr_scale = 1.0
     batch_ratio = total_batch_size / B_REF
 
@@ -175,6 +171,8 @@ def main(**kwargs):
     weight_decay_scaled = get_target_weight_decay(
         config.weight_decay, total_batch_size, B_REF, D_REF, targets_tokens_nums
     )
+    # tokens processed per forward+backward pass per GPU
+    tokens_per_fwdbwd = config.device_batch_size * config.max_seq_len
     world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
     grad_accum_steps = config.total_batch_size // world_tokens_per_fwdbwd
 
@@ -182,24 +180,26 @@ def main(**kwargs):
     dataloader_resume_state_dict = None
 
     train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
-        DATA_DIR,  # data_dir
-        tokenizer,
-        config.device_batch_size,
-        config.max_seq_len,
+        data_dir=DATA_DIR,  # data_dir
+        tokenizer=tokenizer,
+        B=config.device_batch_size,
+        T=config.max_seq_len,
         split="train",
         device=device,
         resume_state_dict=dataloader_resume_state_dict,
     )
     build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
-        DATA_DIR, tokenizer, config.device_batch_size, config.max_seq_len, split="val", device=device
+        data_dir=DATA_DIR,
+        tokenizer=tokenizer,
+        B=config.device_batch_size,
+        T=config.max_seq_len,
+        split="val",
+        device=device,
     )
 
     # Start training loop
 
     step = 0
-    tokens_per_fwdbwd = config.device_batch_size * config.max_seq_len
-    world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
-    grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
 
     num_flops_per_token = estimate_flops(orig_model)
     # num_iterations = round(config.target_flops / (num_flops_per_token * total_batch_size))
@@ -234,7 +234,7 @@ def main(**kwargs):
         {
             "Tokens per micro-batch per rank": tokens_per_fwdbwd,
             "Tokens per micro-batch": world_tokens_per_fwdbwd,
-            "Total batch size": total_batch_size,
+            "Total batch size (tokens)": total_batch_size,
             "Gradient accumulation steps": grad_accum_steps,
             "Total steps": num_iterations,
         }
@@ -244,6 +244,7 @@ def main(**kwargs):
 
     x, y, dataloader_state_dict = next(train_loader)
 
+    step = 0
     while True:
         last_step = step == num_iterations
 
