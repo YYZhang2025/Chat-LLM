@@ -17,6 +17,7 @@ from chat_llm.dataloader import (
 from chat_llm.engine import GenerateEngine, sample_prompts
 from chat_llm.eval.eval_common import evaluate_bpb
 from chat_llm.eval.eval_core import evaluate_core
+from chat_llm.model.attention import USE_FA3
 from chat_llm.model.llm import build_model_meta, estimate_flops
 from chat_llm.optim import optimizer_step, set_optimizer, update_optimizer_state
 from chat_llm.scaling_law import (
@@ -101,6 +102,14 @@ def main(**kwargs):
     assert MODEL_DIR is not None, "MODEL_DIR environment variable is not set"
 
     config = Config(**kwargs)
+
+    if USE_FA3:
+        print_master(
+            "Using FA3 attention implementation. Make sure you have the correct hardware and software setup for this to work properly.",
+            type="warning",
+        )
+    else:
+        print_master("Using standard attention implementation.")
 
     device_type = autodetect_device_type() if config.device_type == "" else config.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = dist_init(device_type)
