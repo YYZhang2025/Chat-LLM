@@ -72,8 +72,8 @@ class Config:
     resume_from_step: int = -1
 
     eval_every: int = 100
-    sample_every: int = 200
-    core_metric_every: int = 2000
+    sample_every: int = 50
+    core_metric_every: int = 100
     save_every: int = -1
 
     eval_tokens: int = 80 * 524288

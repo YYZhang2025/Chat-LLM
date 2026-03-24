@@ -12,11 +12,15 @@ PY
 RUNNING_NAME="pre_train_24L_9.5x"  # for logging and checkpoint naming
 
 
-torchrun --standalone --nproc_per_node=2 -m \
+torchrun --standalone --nproc_per_node=$NUM_GPUS -m \
     trainer.pre_train -- \
     --running_name=$RUNNING_NAME \
-    --aspect_ratio=16 \
-    --max_seq_len=128 \
-    --device_batch_size=2 \
-    --num_iterations=2 \
+    --depth=24 \
+    --target-param-data-ratio=9.5 \
+    --device-batch-size=32 \
+    --num_iterations=200 
 
+# evaluate the model: CORE metric, BPB on train/val, and draw samples
+# torchrun --standalone --nproc_per_node=8 -m \
+#     trainer.base_eval -- \
+#     --device-batch-size=16

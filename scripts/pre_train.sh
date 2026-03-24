@@ -12,7 +12,7 @@ PY
 RUNNING_NAME="pre_train_24L_9.5x"  # for logging and checkpoint naming
 
 
-torchrun --standalone --nproc_per_node=2 -m \
+torchrun --standalone --nproc_per_node=$NUM_GPUS -m \
     trainer.pre_train -- \
     --running_name=$RUNNING_NAME \
     --depth=24 \
