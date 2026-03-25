@@ -2,6 +2,7 @@ import os
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
+import json
 import time
 from dataclasses import asdict, dataclass
 from functools import partial
@@ -10,7 +11,7 @@ import fire
 import torch
 import wandb
 
-from chat_llm.dataloader import (
+from chat_llm.dataloaders.pre_train import (
     tokenizing_distributed_data_loader_bos_bestfit,
     tokenizing_distributed_data_loader_with_state_bos_bestfit,
 )
@@ -105,7 +106,7 @@ def main(**kwargs):
 
     if USE_FA3:
         print_master(
-            "Using FA3 attention implementation. Make sure you have the correct hardware and software setup for this to work properly.",
+            "Using FA3 attention implementation.",
             type="warning",
         )
     else:
@@ -119,7 +120,7 @@ def main(**kwargs):
     if device_type == "cuda":
         gpu_device_name = torch.cuda.get_device_name(0)
         peak_flops = get_peak_flops(gpu_device_name)
-        print_master(f"Detected CUDA device. Peak FLOPs: {format_with_commas(peak_flops)}")
+        print_master(f"Detected {gpu_device_name} device. Peak FLOPs: {format_with_commas(peak_flops)}")
 
     # WanDB setup (only on master process)
     if master_process:
@@ -149,8 +150,12 @@ def main(**kwargs):
 
     # Compute training setup based on scaling laws
     num_scaling_params = get_num_scaling_params(orig_model)
+    print_master(f"Number of scaling parameters in the model: {format_with_commas(num_scaling_params)}")
 
     targets_tokens_nums = get_target_tokens_num(num_scaling_params, config.target_param_data_ratio)
+    print_master(
+        f"Target number of training tokens based on scaling laws: {format_with_commas(targets_tokens_nums)} with target param-data ratio of {config.target_param_data_ratio}"
+    )
     d12_ref = build_model_meta(
         depth=12,
         aspect_ratio=config.aspect_ratio,
@@ -169,6 +174,7 @@ def main(**kwargs):
         if config.total_batch_size > 0
         else get_target_batch_size(targets_tokens_nums, D_REF, B_REF)
     )
+    print_master(f"Total batch size (tokens) for training: {format_with_commas(total_batch_size)} ")
 
     token_bytes = get_token_bytes(device=device)
     batch_lr_scale = 1.0
@@ -207,8 +213,6 @@ def main(**kwargs):
     )
 
     # Start training loop
-
-    step = 0
 
     num_flops_per_token = estimate_flops(orig_model)
     # num_iterations = round(config.target_flops / (num_flops_per_token * total_batch_size))
@@ -371,29 +375,33 @@ def main(**kwargs):
     # Evaluate final model on CORE metric\
     results = {}
     compiled_model.eval()
-    resutls = evaluate_core(orig_model, tokenizer, device, config.core_metric_max_per_task)
+    results = evaluate_core(orig_model, tokenizer, device, config.core_metric_max_per_task)
     print_master("CORE evaluation results:")
     if master_process:
         print("\n=== CORE Results ===")
-        print(f"CORE Metric: {resutls['core_metric']:.4f}\n")
+        print(f"CORE Metric: {results['core_metric']:.4f}\n")
 
         print("Per-task accuracy:")
-        for task, acc in sorted(resutls["results"].items()):
+        for task, acc in sorted(results["results"].items()):
             print(f"  {task:30s}  acc={acc:.4f}")
-
-        print("\nPer-task centered results:")
-        for task, val in sorted(resutls["centered_results"].items()):
-            print(f"  {task:30s}  centered={val:.4f}")
-        for task_name, task_results in resutls.items():
-            print_master(f"Task: {task_name}", type="info")
-            for metric_name, metric_value in task_results.items():
-                print_master(f"{metric_name}: {metric_value:.4f}", type="info")
-                results[f"core/{task_name}_{metric_name}"] = metric_value
 
         wandb_run.log(results)
 
+    print_master(f"Checkpoint saved at step {step:,}")
     # Cleanup
     if master_process:
+        # save results and final checkpoint
+        with open(os.path.join(MODEL_DIR, "final_results.json"), "w") as f:
+            json.dump(results, f)
+
+        save_checkpoint(
+            MODEL_DIR,
+            step,
+            orig_model.state_dict(),  # model parameters
+            optimizer.state_dict(),  # optimizer state
+            {},
+            rank=ddp_rank,
+        )
         wandb_run.finish()
     if ddp:
         clean_dist()

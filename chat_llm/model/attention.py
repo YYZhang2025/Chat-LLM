@@ -106,6 +106,12 @@ def flash_attn_func(q, k, v, causal: bool = True, window_size=(-1, -1)):
     return out.transpose(1, 2)  # (B, T, n_heads, head_dim)
 
 
+def _to_int32(x):
+    if x is None:
+        return None
+    return x if x.dtype == torch.int32 else x.to(dtype=torch.int32)
+
+
 def flash_attn_with_kvcache(
     q, k_cache, v_cache, k=None, v=None, cache_seqlens=None, causal=False, window_size=(-1, -1)
 ):
@@ -126,6 +132,7 @@ def flash_attn_with_kvcache(
         Output tensor of shape (B, T_new, H, D)
     """
     if USE_FA3:
+        cache_seqlens = _to_int32(cache_seqlens)
         return _fa3.flash_attn_with_kvcache(
             q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens, causal=causal, window_size=window_size
         )
