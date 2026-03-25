@@ -73,7 +73,7 @@ class Config:
 
     eval_every: int = 1000
     sample_every: int = 500
-    save_every: int = 1000
+    save_every: int = -1
 
     eval_tokens: int = 80 * 524288
     core_metric_max_per_task: int = 500
