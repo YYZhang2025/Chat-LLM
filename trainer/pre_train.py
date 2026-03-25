@@ -237,6 +237,8 @@ def main(**kwargs):
     )
     scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 
+    print_master(f"Starting training for {format_with_commas(num_iterations)} iterations...")
+
     step = 0
     x, y, dataloader_state_dict = next(train_loader)
     torch.cuda.empty_cache() if device_type == "cuda" else None
