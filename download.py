@@ -24,14 +24,11 @@ BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resol
 MAX_SHARD = 6542  # the last datashard is shard_06542.parquet
 index_to_filename = lambda index: f"shard_{index:05d}.parquet"  # format of the filenames
 base_dir = get_base_dir()
-DATA_DIR = os.environ.get(
-    "DATA_DIR", os.path.join(base_dir, "data")
-)  # local directory where data files are stored
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(base_dir, "data"))
+
 
 # -----------------------------------------------------------------------------
 # These functions are useful utilities to other modules, can/should be imported
-
-
 def download_single_file(index):
     """Downloads a single file index, with some backoff"""
 

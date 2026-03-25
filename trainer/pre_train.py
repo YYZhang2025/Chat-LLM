@@ -34,7 +34,6 @@ from chat_llm.utils.common import (
     autodetect_device_type,
     format_with_commas,
     get_peak_flops,
-    print_dict_master,
     print_master,
 )
 from chat_llm.utils.dist import clean_dist, dist_init
@@ -72,10 +71,9 @@ class Config:
     # Checkpointing and evaluation
     resume_from_step: int = -1
 
-    eval_every: int = 100
-    sample_every: int = 50
-    core_metric_every: int = 100
-    save_every: int = -1
+    eval_every: int = 1000
+    sample_every: int = 500
+    save_every: int = 1000
 
     eval_tokens: int = 80 * 524288
     core_metric_max_per_task: int = 500
@@ -213,9 +211,7 @@ def main(**kwargs):
     )
 
     # Start training loop
-
     num_flops_per_token = estimate_flops(orig_model)
-    # num_iterations = round(config.target_flops / (num_flops_per_token * total_batch_size))
     num_iterations = (
         config.num_iterations if config.num_iterations > 0 else targets_tokens_nums // total_batch_size
     )
@@ -241,23 +237,9 @@ def main(**kwargs):
     )
     scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 
-    # Clean up any existing memory allocations before starting the training loop, to ensure we have an accurate measurement of memory usage during the training loop and to avoid any OOM issues caused by fragmentation from the initial model building and data loading steps.
-
-    print_dict_master(
-        {
-            "Tokens per micro-batch per rank": tokens_per_fwdbwd,
-            "Tokens per micro-batch": world_tokens_per_fwdbwd,
-            "Total batch size (tokens)": total_batch_size,
-            "Gradient accumulation steps": grad_accum_steps,
-            "Total steps": num_iterations,
-        }
-    )
-
-    torch.cuda.empty_cache() if device_type == "cuda" else None
-
-    x, y, dataloader_state_dict = next(train_loader)
-
     step = 0
+    x, y, dataloader_state_dict = next(train_loader)
+    torch.cuda.empty_cache() if device_type == "cuda" else None
     while True:
         last_step = step == num_iterations
 
@@ -283,7 +265,7 @@ def main(**kwargs):
             compiled_model.train()
 
         # Save checkpoint
-        if config.save_every > 0 and (step + 1) % config.save_every == 0:
+        if master_process and config.save_every > 0 and (step + 1) % config.save_every == 0:
             save_checkpoint(
                 MODEL_DIR,
                 step,
@@ -356,10 +338,8 @@ def main(**kwargs):
                     "train/loss": train_loss,
                     "train/lr": current_lr,
                     "train/step_time_sec": dt,
-                    "train/max_memory_bytes": max_memory_bytes,
                     "train/max_memory_gb": max_memory_gb,
                     "train/throughput_tokens_per_sec": throughput_tokens_per_sec,
-                    "train/tokens_this_step": tokens_this_step,
                     "train/tokens_seen": tokens_seen,
                     "train/grad_accum_steps": grad_accum_steps,
                     "train/batch_lr_scale": batch_lr_scale,

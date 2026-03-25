@@ -9,17 +9,14 @@ import torch
 print(torch.cuda.device_count())
 PY
 )
-RUNNING_NAME="pre_train_24L_9.5x"  # for logging and checkpoint naming
+DEPTH=24
+TARGET_PARAM_DATA_RATIO=20
+RUNNING_NAME="pre_train_${DEPTH}L_${TARGET_PARAM_DATA_RATIO}x"  # for logging and checkpoint naming
 
 
 torchrun --standalone --nproc_per_node=$NUM_GPUS -m \
     trainer.pre_train -- \
     --running_name=$RUNNING_NAME \
-    --depth=24 \
-    --target-param-data-ratio=9.5 \
-    --device-batch-size=16 
-
-# evaluate the model: CORE metric, BPB on train/val, and draw samples
-# torchrun --standalone --nproc_per_node=8 -m \
-#     trainer.base_eval -- \
-#     --device-batch-size=16
+    --depth=$DEPTH \
+    --target_param_data_ratio=$TARGET_PARAM_DATA_RATIO \
+    --device_batch_size=32 

@@ -70,8 +70,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         nonlocal pq_idx, rg_idx, epoch
         doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
         token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
-        # for tokens in token_lists:
-        #     doc_buffer.append(tokens)
+
         for tokens in token_lists:
             doc_buffer.append(torch.tensor(tokens, dtype=torch.long))
 
@@ -116,9 +115,6 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                     # No doc fits - crop shortest in buffer to fill remaining and minimize waste
                     shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
                     doc = doc_buffer.pop(shortest_idx)
-                    # row_buffer[row_idx, pos : pos + remaining] = torch.tensor(
-                    #     doc[:remaining], dtype=torch.long
-                    # )
                     row_buffer[row_idx, pos : pos + remaining].copy_(doc[:remaining])
                     pos += remaining
 
