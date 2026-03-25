@@ -9,14 +9,12 @@ import torch
 print(torch.cuda.device_count())
 PY
 )
-DEPTH=24
-TARGET_PARAM_DATA_RATIO=20
-RUNNING_NAME="pre_train_${DEPTH}L_${TARGET_PARAM_DATA_RATIO}x"  # for logging and checkpoint naming
-
+DEPTH=26
+RUNNING_NAME="pre_train_${DEPTH}L"  # for logging and checkpoint naming
+DEVICE_BATCH_SIZE=32 # Adjust based on GPU memory;
 
 torchrun --standalone --nproc_per_node=$NUM_GPUS -m \
     trainer.pre_train -- \
     --running_name=$RUNNING_NAME \
     --depth=$DEPTH \
-    --target_param_data_ratio=$TARGET_PARAM_DATA_RATIO \
-    --device_batch_size=32 
+    --device_batch_size=$DEVICE_BATCH_SIZE 

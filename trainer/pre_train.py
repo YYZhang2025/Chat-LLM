@@ -73,7 +73,7 @@ class Config:
 
     eval_every: int = 1000
     sample_every: int = 500
-    save_every: int = -1
+    save_every: int = 1000
 
     eval_tokens: int = 80 * 524288
     core_metric_max_per_task: int = 500
@@ -281,6 +281,8 @@ def main(**kwargs):
 
         if master_process and config.sample_every > 0 and (step + 1) % config.sample_every == 0:
             compiled_model.eval()
+            orig_model.eval()
+
             engine = GenerateEngine(orig_model, tokenizer)
             print_master("Sampling prompts...", type="info")
             results = sample_prompts(prompts_sample, engine)
@@ -288,6 +290,7 @@ def main(**kwargs):
                 print_master(f"Sample {i + 1}:", type="info")
                 print_master(f"Generation: {generated}", type="info")
 
+            orig_model.train()
             compiled_model.train()
 
         # Training step
@@ -343,7 +346,6 @@ def main(**kwargs):
                     "train/max_memory_gb": max_memory_gb,
                     "train/throughput_tokens_per_sec": throughput_tokens_per_sec,
                     "train/tokens_seen": tokens_seen,
-                    "train/grad_accum_steps": grad_accum_steps,
                     "train/batch_lr_scale": batch_lr_scale,
                     "train/weight_decay_scaled": weight_decay_scaled,
                     "train/mfu": mfu,
@@ -357,22 +359,14 @@ def main(**kwargs):
     # Evaluate final model on CORE metric\
     results = {}
     compiled_model.eval()
-    results = evaluate_core(orig_model, tokenizer, device, config.core_metric_max_per_task)
     print_master("CORE evaluation results:")
-    if master_process:
-        print("\n=== CORE Results ===")
-        print(f"CORE Metric: {results['core_metric']:.4f}\n")
-
-        print("Per-task accuracy:")
-        for task, acc in sorted(results["results"].items()):
-            print(f"  {task:30s}  acc={acc:.4f}")
-
-        wandb_run.log(results)
+    results = evaluate_core(orig_model, tokenizer, device, config.core_metric_max_per_task)
 
     print_master(f"Checkpoint saved at step {step:,}")
     # Cleanup
     if master_process:
         # save results and final checkpoint
+        os.makedirs(MODEL_DIR, exist_ok=True)
         with open(os.path.join(MODEL_DIR, "final_results.json"), "w") as f:
             json.dump(results, f)
 
