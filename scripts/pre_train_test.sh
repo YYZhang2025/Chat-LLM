@@ -20,8 +20,8 @@ torchrun --standalone --nproc_per_node=$NUM_GPUS -m \
     --device_batch_size=32 \
     --num_iterations=100 \
     --eval_every=50 \
-    --sample_every = 20 \
-    --core_metric_every = 50 
+    --sample_every=20 \
+    --core_metric_every=50 
 
 
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
