@@ -356,13 +356,28 @@ def main(**kwargs):
         step += 1
     # ---------- End of training loop ----------
 
+    compiled_model.eval()
+    val_loader = build_val_loader()
+    eval_steps = config.eval_tokens // (config.device_batch_size * config.max_seq_len * ddp_world_size)
+    print_master(f"Evaluating at step {step:,}... Eval steps: {format_with_commas(eval_steps)}")
+    val_bpb = evaluate_bpb(compiled_model, val_loader, eval_steps, token_bytes)
+    print_master(f"Step {step:,} | Validation bpb: {val_bpb:.4f}")
+
+    if master_process:
+        wandb_run.log(
+            {
+                "val/bpb": val_bpb,
+            },
+            step=step,
+        )
+
     # Evaluate final model on CORE metric\
     results = {}
-    compiled_model.eval()
     print_master("CORE evaluation results:")
     results = evaluate_core(orig_model, tokenizer, device, config.core_metric_max_per_task)
 
     print_master(f"Checkpoint saved at step {step:,}")
+
     # Cleanup
     if master_process:
         # save results and final checkpoint
