@@ -27,6 +27,8 @@ from chat_llm.utils.common import (
 )
 from chat_llm.utils.dist import clean_dist, dist_init
 
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+
 
 @dataclass
 class Config:
@@ -128,8 +130,6 @@ def get_muon_momentum(step: int) -> float:
 
 
 def main(**kwargs):
-    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-
     DATA_DIR = os.environ.get("DATA_DIR")
     TOKENIZER_DIR = os.environ.get("TOKENIZER_DIR")
     MODEL_DIR = os.environ.get("MODEL_DIR")
@@ -167,7 +167,7 @@ def main(**kwargs):
     # Tokenizer
     tokenizer = get_tokenizer(TOKENIZER_DIR)
     vocab_size = tokenizer.get_vocab_size()
-    token_bytes = get_token_bytes(tokenizer)
+    token_bytes = get_token_bytes()
     print_master(f"Vocab size: {vocab_size:,}")
 
     # Model
@@ -205,9 +205,6 @@ def main(**kwargs):
         scalar_lr=config.scalar_lr,
         weight_decay=config.weight_decay,
     )
-
-    if optimizer_data is not None:
-        optimizer.load_state_dict(optimizer_data)
 
     scaler = (
         torch.amp.GradScaler("cuda") if (device_type == "cuda" and COMPUTE_DTYPE == torch.float16) else None
@@ -367,7 +364,6 @@ def main(**kwargs):
                     "step": step,
                 }
                 wandb.log(log_dict, step=step)
-
             print_master(
                 f"Step {step} | "
                 f"Loss: {train_loss.item():.4f} | "
@@ -378,7 +374,6 @@ def main(**kwargs):
                 f"Epoch: {progress_state['current_epoch']} | "
                 f"Progress: {progress_state['approx_progress']:.4f}"
             )
-
             # Save
             if config.save_every > 0 and step % config.save_every == 0:
                 save_checkpoint(
@@ -399,7 +394,6 @@ def main(**kwargs):
                 gc.collect()
                 if device_type == "cuda":
                     torch.cuda.empty_cache()
-
     finally:
         if master_process and wandb_run is not None:
             wandb_run.finish()
