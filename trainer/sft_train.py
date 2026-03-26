@@ -1,6 +1,4 @@
 import gc
-import json
-import math
 import os
 import time
 from dataclasses import asdict, dataclass
@@ -15,9 +13,9 @@ from chat_llm.eval.eval_common import evaluate_bpb
 from chat_llm.model.attention import USE_FA3
 from chat_llm.model.llm import build_model_meta
 from chat_llm.optim import set_optimizer
-from chat_llm.task import ARC, GSM8K, MMLU, SmolTalk, TaskMixture
+from chat_llm.task import GSM8K, MMLU, SmolTalk, TaskMixture
 from chat_llm.tokenizer import get_token_bytes, get_tokenizer
-from chat_llm.utils.checkpoint import load_checkpoint, save_checkpoint
+from chat_llm.utils.checkpoint import save_checkpoint
 from chat_llm.utils.common import (
     COMPUTE_DTYPE,
     autodetect_device_type,
@@ -55,7 +53,7 @@ class Config:
     scalar_lr: float = 0.5
     weight_decay: float = 0.28
 
-    warmup_steps: int = 40
+    warmup_ratio: float = 0.0
     warmdown_ratio: float = 0.65
     final_lr_frac: float = 0.05
     init_lr_frac: float = 0.1
@@ -72,8 +70,8 @@ class Config:
     core_metric_max_per_task: int = 500
 
     # SFT
-    mmlu_epochs: int = 2
-    gsm8k_epochs: int = 2
+    mmlu_epochs: int = 1
+    gsm8k_epochs: int = 1
 
     compiled: bool = True
 
@@ -99,34 +97,21 @@ def get_grad_accum_steps(config: Config, ddp_world_size: int) -> int:
     return config.total_batch_size // denom
 
 
-def get_lr_multiplier(
-    step: int, total_steps: int, warmup_steps: int, warmdown_ratio: float, final_lr_frac: float
-) -> float:
-    """
-    LR schedule:
-    1. linear warmup
-    2. cosine decay
-    3. final lr floor = final_lr_frac
-    """
-    if total_steps <= 0:
+def get_lr_multiplier(progress, warmdown_ratio, warmup_ratio, final_lr_frac):
+    if progress < warmup_ratio:
+        return (progress + 1e-8) / warmup_ratio
+    elif progress <= 1.0 - warmdown_ratio:
         return 1.0
-
-    if step < warmup_steps:
-        return (step + 1) / max(1, warmup_steps)
-
-    decay_start = warmup_steps
-    decay_end = total_steps
-    if step >= decay_end:
-        return final_lr_frac
-
-    progress = (step - decay_start) / max(1, decay_end - decay_start)
-    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-    return final_lr_frac + (1.0 - final_lr_frac) * cosine
+    else:
+        decay = (progress - (1.0 - warmdown_ratio)) / warmdown_ratio
+        return (1 - decay) * 1.0 + decay * final_lr_frac
 
 
-def get_muon_momentum(step: int) -> float:
-    # 先给一个稳定默认值；如果你项目里有自己的 muon schedule，可以替换这里
-    return 0.95
+# Momentum scheduler for Muon optimizer
+def get_muon_momentum(it):
+    frac = min(it / 300, 1)
+    momentum = (1 - frac) * 0.85 + frac * 0.95
+    return momentum
 
 
 def main(**kwargs):
@@ -183,13 +168,18 @@ def main(**kwargs):
     model.init_weights()
 
     # Load checkpoint
-    model_data, optimizer_data, meta_data = load_checkpoint(
-        checkpoint_dir=MODEL_DIR,
-        step=config.model_step,
-        device=device,
-        load_optimizer=True,
-        rank=ddp_rank,
-    )
+    step = config.model_step
+    if step == -1:
+        # Find latest checkpoint by looking for files matching model_*.pt and taking the max step number
+        model_files = [f for f in os.listdir(MODEL_DIR) if f.startswith("model_") and f.endswith(".pt")]
+        if len(model_files) == 0:
+            raise ValueError(f"No checkpoint files found in {MODEL_DIR}")
+        model_steps = [int(f[len("model_") : -len(".pt")]) for f in model_files]
+        step = max(model_steps)
+        print(f"Auto-detected latest checkpoint step: {step}")
+
+    model_path = os.path.join(MODEL_DIR, f"model_{step:06d}.pt")
+    model_data = torch.load(model_path, map_location=device)
 
     if model_data is not None:
         model.load_state_dict(model_data)
@@ -220,15 +210,14 @@ def main(**kwargs):
     train_tasks = [
         SmolTalk(split="train"),
         *[MMLU(subset="auxiliary_train", split="train") for _ in range(config.mmlu_epochs)],
-        *[GSM8K(subset="main", split="train") for _ in range(config.gsm8k_epochs)],
+        # *[GSM8K(subset="main", split="train") for _ in range(config.gsm8k_epochs)],
     ]
     train_dataset = TaskMixture(train_tasks)
 
     val_dataset = TaskMixture(
         [
-            SmolTalk(split="val"),
-            MMLU(subset="auxiliary_train", split="val"),
-            GSM8K(subset="main", split="val"),
+            SmolTalk(split="test"),
+            GSM8K(subset="main", split="test"),
         ]
     )
 
@@ -310,12 +299,10 @@ def main(**kwargs):
                 x, y = next(train_loader)
 
             # LR update
-            total_steps_for_sched = config.num_iterations if config.num_iterations > 0 else max(step + 1, 1)
             lrm = get_lr_multiplier(
-                step=step,
-                total_steps=total_steps_for_sched,
-                warmup_steps=config.warmup_steps,
+                progress=progress_state["approx_progress"],
                 warmdown_ratio=config.warmdown_ratio,
+                warmup_ratio=config.warmup_ratio,
                 final_lr_frac=config.final_lr_frac,
             )
             muon_momentum = get_muon_momentum(step)
