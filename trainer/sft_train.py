@@ -9,6 +9,7 @@ import torch.distributed as dist
 import wandb
 
 from chat_llm.dataloaders.sft import build_sft_dataloader
+from chat_llm.engine import GenerateEngine, sample_prompts
 from chat_llm.eval.eval_common import evaluate_bpb
 from chat_llm.model.attention import USE_FA3
 from chat_llm.model.llm import build_model_meta
@@ -63,7 +64,7 @@ class Config:
     model_step: int = -1
 
     eval_every: int = 1000
-    sample_every: int = 500
+    sample_every: int = 200
     save_every: int = 1000
 
     eval_tokens: int = 80 * 524288
@@ -74,6 +75,12 @@ class Config:
     gsm8k_epochs: int = 1
 
     compiled: bool = True
+
+
+prompt_samples = [
+    "<|user_start|>What is the Transformer?<|user_end|><|assistant_start|>",
+    "<|user_start|>What is 1+1?<|user_end|><|assistant_start|>",
+]
 
 
 def is_ddp_initialized() -> bool:
@@ -263,6 +270,19 @@ def main(**kwargs):
             else:
                 last_step = progress_state["last_step"]
 
+            if config.sample_every > 0 and (step + 1) % config.sample_every == 0:
+                compiled_model.eval()
+                original_model.eval()
+
+                engine = GenerateEngine(original_model, tokenizer)
+                print_master("Sampling prompts...", type="info")
+                results = sample_prompts(prompt_samples, engine)
+                for i, generated in enumerate(results):
+                    print_master(f"Sample {i + 1}:", type="info")
+                    print_master(f"Generation: {generated}", type="info")
+
+                original_model.train()
+                compiled_model.train()
             # Eval
             if last_step or (config.eval_every > 0 and (step + 1) % config.eval_every == 0):
                 compiled_model.eval()

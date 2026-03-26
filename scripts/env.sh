@@ -1,6 +1,6 @@
 
 export WANDB_API_KEY="your_wandb_api_key_here"
-
+export HF_TOKEN="your_huggingface_token_here"
 
 export CHAT_LLM_BASE_DIR="$HOME/cache/chat-llm"
 export DATA_DIR="$CHAT_LLM_BASE_DIR/data"
