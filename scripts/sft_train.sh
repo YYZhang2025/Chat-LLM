@@ -9,14 +9,14 @@ import torch
 print(torch.cuda.device_count())
 PY
 )
-echo "Detected $NUM_GPUS GPUs for pre-training."
+echo "Detected $NUM_GPUS GPUs for SFT."
 
 DEPTH=26
-RUNNING_NAME="pre_train_${DEPTH}L"  # for logging and checkpoint naming
-DEVICE_BATCH_SIZE=32 # Adjust based on GPU memory;
+RUNNING_NAME="sft_${DEPTH}L"  # for logging and checkpoint naming
+DEVICE_BATCH_SIZE=15 # Adjust based on GPU memory;
 
 torchrun --standalone --nproc_per_node=$NUM_GPUS -m \
-    trainer.pre_train -- \
+    trainer.sft_train -- \
     --running_name=$RUNNING_NAME \
     --depth=$DEPTH \
     --device_batch_size=$DEVICE_BATCH_SIZE 

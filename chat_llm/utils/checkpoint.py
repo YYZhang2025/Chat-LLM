@@ -22,6 +22,15 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
 
 
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
+    if step == -1:
+        # Find latest checkpoint by looking for files matching model_*.pt and taking the max step number
+        model_files = [f for f in os.listdir(checkpoint_dir) if f.startswith("model_") and f.endswith(".pt")]
+        if len(model_files) == 0:
+            raise ValueError(f"No checkpoint files found in {checkpoint_dir}")
+        model_steps = [int(f[len("model_") : -len(".pt")]) for f in model_files]
+        step = max(model_steps)
+        print(f"Auto-detected latest checkpoint step: {step}")
+
     # Load the model state
     model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
     model_data = torch.load(model_path, map_location=device)
