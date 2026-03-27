@@ -11,10 +11,11 @@ import wandb
 from chat_llm.dataloaders.sft import build_sft_dataloader
 from chat_llm.engine import GenerateEngine, sample_prompts
 from chat_llm.eval.eval_common import evaluate_bpb
+from chat_llm.eval.eval_sft import run_chat_eval
 from chat_llm.model.attention import USE_FA3
 from chat_llm.model.llm import build_model_meta
 from chat_llm.optim import set_optimizer
-from chat_llm.task import GSM8K, MMLU, SmolTalk, TaskMixture
+from chat_llm.task import GSM8K, MMLU, CustomJSON, SmolTalk, TaskMixture
 from chat_llm.tokenizer import get_token_bytes, get_tokenizer
 from chat_llm.utils.checkpoint import save_checkpoint
 from chat_llm.utils.common import (
@@ -66,6 +67,9 @@ class Config:
     eval_every: int = 1000
     sample_every: int = 50
     save_every: int = 1000
+    chatcore_every: int = 10
+    chatcore_max_cat: int = 500
+    chatcore_max_sample: int = 1000
 
     eval_tokens: int = 80 * 524288
     core_metric_max_per_task: int = 500
@@ -214,17 +218,21 @@ def main(**kwargs):
         group["lr"] = base_lr * config.init_lr_frac
 
     # Dataset
+    custom_json_path = os.path.join(DATA_DIR, "identity_conversations.jsonl")
     train_tasks = [
         SmolTalk(split="train"),
+        CustomJSON(filepath=custom_json_path),  # 1000 rows of synthetic identity conversations
+        CustomJSON(filepath=custom_json_path),  # 2 epochs of these
         *[MMLU(subset="auxiliary_train", split="train") for _ in range(config.mmlu_epochs)],
-        # *[GSM8K(subset="main", split="train") for _ in range(config.gsm8k_epochs)],
+        *[GSM8K(subset="main", split="train") for _ in range(config.gsm8k_epochs)],
     ]
     train_dataset = TaskMixture(train_tasks)
 
     val_dataset = TaskMixture(
         [
             SmolTalk(split="test"),
-            GSM8K(subset="main", split="test"),
+            MMLU(subset="all", split="test", stop=5200),
+            GSM8K(subset="main", split="test", stop=420),
         ]
     )
 
@@ -238,7 +246,7 @@ def main(**kwargs):
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         tokenizer=tokenizer,
-        config=config,  # 如果你的 build_sft_dataloader 用的是 config，就把这里改回 config=config
+        config=config,
         ddp_rank=ddp_rank,
         ddp_world_size=ddp_world_size,
         device=device,
@@ -247,7 +255,6 @@ def main(**kwargs):
     )
 
     train_loader = build_train_loader()
-    val_loader = build_val_loader()
 
     grad_accum_steps = get_grad_accum_steps(config, ddp_world_size)
     print_master(f"grad_accum_steps: {grad_accum_steps}")
@@ -286,6 +293,7 @@ def main(**kwargs):
             # Eval
             if last_step or (config.eval_every > 0 and (step + 1) % config.eval_every == 0):
                 compiled_model.eval()
+                val_loader = build_val_loader()
                 eval_steps = max(1, config.eval_tokens // (config.device_batch_size * config.max_seq_len))
                 val_bpb = evaluate_bpb(
                     compiled_model,
@@ -294,6 +302,64 @@ def main(**kwargs):
                     token_bytes=token_bytes,
                 )
                 print_master(f"Step {step + 1}: Validation Bits-Per-Byte: {val_bpb:.4f}")
+                compiled_model.train()
+
+            if last_step or (config.chatcore_every > 0 and (step + 1) % config.chatcore_every == 0):
+                compiled_model.eval()
+                engine = GenerateEngine(original_model, tokenizer)
+                all_tasks = [
+                    "ARC-Easy",
+                    "ARC-Challenge",
+                    "MMLU",
+                    "GSM8K",
+                    "HumanEval",
+                ]
+                categorical_tasks = {"ARC-Easy", "ARC-Challenge", "MMLU"}
+                baseline_accuracies = {
+                    "ARC-Easy": 0.25,
+                    "ARC-Challenge": 0.25,
+                    "MMLU": 0.25,
+                    "GSM8K": 0.0,
+                    "HumanEval": 0.0,
+                }
+                task_results = {}
+                for task_name in all_tasks:
+                    limit = (
+                        config.chatcore_max_cat
+                        if task_name in categorical_tasks
+                        else config.chatcore_max_sample
+                    )
+                    max_problems = None if limit < 0 else limit  # -1 means no limit
+                    acc = run_chat_eval(
+                        task_name,
+                        original_model,
+                        tokenizer,
+                        engine,
+                        batch_size=config.device_batch_size,
+                        max_problems=max_problems,
+                    )
+                    task_results[task_name] = acc
+                    print_master(f"  {task_name}: {100 * acc:.2f}%")
+
+                # Compute ChatCORE metrics (mean centered accuracy, ranges from 0=random to 1=perfect)
+                def centered_mean(tasks):
+                    return sum(
+                        (task_results[t] - baseline_accuracies[t]) / (1.0 - baseline_accuracies[t])
+                        for t in tasks
+                    ) / len(tasks)
+
+                chatcore = centered_mean(all_tasks)
+                chatcore_cat = centered_mean(categorical_tasks)
+                print_master(f"Step {step:05d} | ChatCORE: {chatcore:.4f} | ChatCORE_cat: {chatcore_cat:.4f}")
+                if master_process and wandb_run is not None:
+                    wandb_run.log(
+                        {
+                            "step": step,
+                            "chatcore_metric": chatcore,
+                            "chatcore_cat": chatcore_cat,
+                            **{f"chatcore/{task_name}": acc for task_name, acc in task_results.items()},
+                        }
+                    )
                 compiled_model.train()
 
             if last_step:
