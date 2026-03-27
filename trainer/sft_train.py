@@ -64,7 +64,7 @@ class Config:
     model_step: int = -1
 
     eval_every: int = 1000
-    sample_every: int = 200
+    sample_every: int = 50
     save_every: int = 1000
 
     eval_tokens: int = 80 * 524288
