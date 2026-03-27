@@ -6,6 +6,8 @@ from contextlib import contextmanager
 import torch
 import torch.nn.functional as F
 
+from chat_llm.model.kv_cache import KVCache
+
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
@@ -154,8 +156,6 @@ class GenerateEngine:
             "num_layers": m.n_layers,
         }
 
-        from chat_llm.model.kv_cache import KVCache
-
         kv_cache_prefill = KVCache(
             batch_size=1,
             seq_len=len(tokens),
@@ -262,11 +262,15 @@ def sample_prompts(
 
     results = []
     for prompt in prompts:
-        tokens = tokenizer.encode(prompt)
-        sample, _ = engine.generate_batch(
-            tokens, num_samples=1, max_tokens=256, temperature=0.0, top_k=1, seed=42
+        tokens = tokenizer.encode(prompt, prepend="<|bos|>")
+        sample, mask = engine.generate_batch(
+            tokens, num_samples=1, max_tokens=16, temperature=0.0, top_k=1, seed=42
         )  # max_tokens=0 means "generate until the end"
         sample = sample[0]  # remove batch dimension
+        mask = mask[0]
+        # Remove masked tokens (those that were forced in, not sampled)
+        sample = [token for token, m in zip(sample, mask) if m == 1]
+
         decoded_sample = tokenizer.decode(sample)
         results.append(decoded_sample)
 

@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 import torch
@@ -33,6 +34,8 @@ class ModelConfig:
             "n_layers must be a multiple of the length of window_pattern"
         )
         assert self.n_q_heads % self.n_kv_heads == 0, "n_q_heads must be divisible by n_kv_heads"
+
+        # self.d_ff = math.floor(self.embed_dim * 8 / 3 / 64) * 64
 
 
 def rms_norm(x: torch.Tensor) -> torch.Tensor:
@@ -133,6 +136,8 @@ class CausalSelfAttention(nn.Module):
         # Apply QK-Norm
         q = rms_norm(q)
         k = rms_norm(k)
+        q = q * 1.15
+        k = k * 1.15
 
         if kv_cache is None:
             out = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
@@ -186,18 +191,20 @@ class Block(nn.Module):
 def pre_compute_cos_sin(
     max_seq_len: int,
     head_dim: int,
-    base: int = 10_000,
+    base: int = 100_000,
     device: torch.device = torch.device("cpu"),
     dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    channel_range = torch.arange(head_dim // 2, device=device, dtype=torch.float32)
-    inv_freq = 1.0 / (base ** (channel_range / (head_dim // 2)))
+    channel_range = torch.arange(0, head_dim, 2, device=device, dtype=torch.float32)
+    inv_freq = 1.0 / (base ** (channel_range / head_dim))
     pos_ids = torch.arange(max_seq_len, device=device, dtype=torch.float32)
 
     freqs = torch.einsum("i,j->ij", pos_ids, inv_freq)  # (max_seq_len, head_dim // 2)
-    cos = freqs.cos()[None, :, None, :]  # (1, max_seq_len, 1, head_dim // 2)
-    sin = freqs.sin()[None, :, None, :]  # (1, max_seq_len, 1, head_dim // 2)
-    return cos.to(dtype), sin.to(dtype)
+    cos, sin = freqs.cos(), freqs.sin()  # (max_seq_len, head_dim // 2)
+    cos, sin = cos.to(dtype=dtype), sin.to(dtype=dtype)
+    cos = cos[None, :, None, :]  # (1, max_seq_len, 1, head_dim // 2)
+    sin = sin[None, :, None, :]  # (1, max_seq_len, 1, head_dim // 2)
+    return cos, sin
 
 
 class LLMModel(nn.Module):
@@ -333,7 +340,7 @@ class LLMModel(nn.Module):
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
                 reduction=loss_reduction,
-                ignore_index=-100,
+                ignore_index=-1,
             )
             return loss
         else:
@@ -372,13 +379,15 @@ def build_model_meta(depth, aspect_ratio, head_dim, vocab_size, max_seq_len, win
     base_dim = depth * aspect_ratio
     model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
     num_heads = model_dim // head_dim
+    # d_ff = math.floor(model_dim * 8 / 3 / 64) * 64
+    d_ff = model_dim * 4
     config = ModelConfig(
         embed_dim=model_dim,
         n_q_heads=num_heads,
         n_kv_heads=num_heads,
         vocab_size=vocab_size,
         max_seq_len=max_seq_len,
-        d_ff=4 * model_dim,
+        d_ff=d_ff,
         window_pattern=window_pattern,
     )
     with torch.device("meta"):

@@ -25,7 +25,7 @@ class KVCache:
             (num_layers, batch_size, seq_len, num_heads, head_dim), device=device, dtype=dtype
         )
 
-        self.cache_seq_lens = torch.zeros(batch_size, device=device, dtype=torch.long)  # (batch_size,)
+        self.cache_seq_lens = torch.zeros(batch_size, device=device, dtype=torch.int32)  # (batch_size,)
 
     def reset(self):
         self.k_cache.zero_()

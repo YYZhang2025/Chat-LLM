@@ -379,20 +379,20 @@ def main(**kwargs):
     print_master(f"Checkpoint saved at step {step:,}")
 
     # Cleanup
+    # save results and final checkpoint
+
+    save_checkpoint(
+        MODEL_DIR,
+        step,
+        orig_model.state_dict(),  # model parameters
+        optimizer.state_dict(),  # optimizer state
+        {},
+        rank=ddp_rank,
+    )
+
     if master_process:
-        # save results and final checkpoint
-        os.makedirs(MODEL_DIR, exist_ok=True)
         with open(os.path.join(MODEL_DIR, "final_results.json"), "w") as f:
             json.dump(results, f)
-
-        save_checkpoint(
-            MODEL_DIR,
-            step,
-            orig_model.state_dict(),  # model parameters
-            optimizer.state_dict(),  # optimizer state
-            {},
-            rank=ddp_rank,
-        )
         wandb_run.finish()
     if ddp:
         clean_dist()
