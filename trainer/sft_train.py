@@ -15,7 +15,7 @@ from chat_llm.eval.eval_sft import run_chat_eval
 from chat_llm.model.attention import USE_FA3
 from chat_llm.model.llm import build_model_meta
 from chat_llm.optim import set_optimizer
-from chat_llm.task import GSM8K, MMLU, CustomJSON, SmolTalk, TaskMixture
+from chat_llm.task import GSM8K, MMLU, CustomJSON, HumanEval, SmolTalk, TaskMixture
 from chat_llm.tokenizer import get_token_bytes, get_tokenizer
 from chat_llm.utils.checkpoint import save_checkpoint
 from chat_llm.utils.common import (
@@ -68,8 +68,8 @@ class Config:
     sample_every: int = 50
     save_every: int = 1000
     chatcore_every: int = 10
-    chatcore_max_cat: int = 500
-    chatcore_max_sample: int = 1000
+    chatcore_max_cat: int = -1
+    chatcore_max_sample: int = 24
 
     eval_tokens: int = 80 * 524288
     core_metric_max_per_task: int = 500
@@ -264,213 +264,206 @@ def main(**kwargs):
 
     compiled_model.train()
 
-    try:
-        while True:
-            if ddp:
-                last_step_tensor = torch.tensor(
-                    int(progress_state["last_step"]),
-                    dtype=torch.int32,
-                    device=device,
+    while True:
+        if ddp:
+            last_step_tensor = torch.tensor(
+                int(progress_state["last_step"]),
+                dtype=torch.int32,
+                device=device,
+            )
+            dist.all_reduce(last_step_tensor, op=dist.ReduceOp.MAX)
+            last_step = last_step_tensor.item() == 1
+        else:
+            last_step = progress_state["last_step"]
+
+        if config.sample_every > 0 and (step + 1) % config.sample_every == 0:
+            compiled_model.eval()
+            original_model.eval()
+
+            engine = GenerateEngine(original_model, tokenizer)
+            print_master("Sampling prompts...", type="info")
+            results = sample_prompts(prompt_samples, engine)
+            for i, generated in enumerate(results):
+                print_master(f"Sample {i + 1}:", type="info")
+                print_master(f"Generation: {generated}", type="info")
+
+            original_model.train()
+            compiled_model.train()
+        # Eval
+        if last_step or (config.eval_every > 0 and (step + 1) % config.eval_every == 0):
+            compiled_model.eval()
+            val_loader = build_val_loader()
+            eval_steps = max(1, config.eval_tokens // (config.device_batch_size * config.max_seq_len))
+            val_bpb = evaluate_bpb(
+                compiled_model,
+                val_loader,
+                eval_steps,
+                token_bytes=token_bytes,
+            )
+            print_master(f"Step {step + 1}: Validation Bits-Per-Byte: {val_bpb:.4f}")
+            compiled_model.train()
+
+        if last_step or (config.chatcore_every > 0 and (step + 1) % config.chatcore_every == 0):
+            compiled_model.eval()
+            engine = GenerateEngine(original_model, tokenizer)
+            all_tasks = [
+                "ARC-Easy",
+                "ARC-Challenge",
+                "MMLU",
+                "GSM8K",
+                "HumanEval",
+            ]
+            categorical_tasks = {"ARC-Easy", "ARC-Challenge", "MMLU"}
+            baseline_accuracies = {
+                "ARC-Easy": 0.25,
+                "ARC-Challenge": 0.25,
+                "MMLU": 0.25,
+                "GSM8K": 0.0,
+                "HumanEval": 0.0,
+            }
+            task_results = {}
+            for task_name in all_tasks:
+                limit = (
+                    config.chatcore_max_cat if task_name in categorical_tasks else config.chatcore_max_sample
                 )
-                dist.all_reduce(last_step_tensor, op=dist.ReduceOp.MAX)
-                last_step = last_step_tensor.item() == 1
-            else:
-                last_step = progress_state["last_step"]
-
-            if config.sample_every > 0 and (step + 1) % config.sample_every == 0:
-                compiled_model.eval()
-                original_model.eval()
-
-                engine = GenerateEngine(original_model, tokenizer)
-                print_master("Sampling prompts...", type="info")
-                results = sample_prompts(prompt_samples, engine)
-                for i, generated in enumerate(results):
-                    print_master(f"Sample {i + 1}:", type="info")
-                    print_master(f"Generation: {generated}", type="info")
-
-                original_model.train()
-                compiled_model.train()
-            # Eval
-            if last_step or (config.eval_every > 0 and (step + 1) % config.eval_every == 0):
-                compiled_model.eval()
-                val_loader = build_val_loader()
-                eval_steps = max(1, config.eval_tokens // (config.device_batch_size * config.max_seq_len))
-                val_bpb = evaluate_bpb(
-                    compiled_model,
-                    val_loader,
-                    eval_steps,
-                    token_bytes=token_bytes,
+                max_problems = None if limit < 0 else limit  # -1 means no limit
+                acc = run_chat_eval(
+                    task_name,
+                    original_model,
+                    tokenizer,
+                    engine,
+                    batch_size=config.device_batch_size,
+                    max_problems=max_problems,
                 )
-                print_master(f"Step {step + 1}: Validation Bits-Per-Byte: {val_bpb:.4f}")
-                compiled_model.train()
+                task_results[task_name] = acc
+                print_master(f"  {task_name}: {100 * acc:.2f}%")
 
-            if last_step or (config.chatcore_every > 0 and (step + 1) % config.chatcore_every == 0):
-                compiled_model.eval()
-                engine = GenerateEngine(original_model, tokenizer)
-                all_tasks = [
-                    "ARC-Easy",
-                    "ARC-Challenge",
-                    "MMLU",
-                    "GSM8K",
-                    "HumanEval",
-                ]
-                categorical_tasks = {"ARC-Easy", "ARC-Challenge", "MMLU"}
-                baseline_accuracies = {
-                    "ARC-Easy": 0.25,
-                    "ARC-Challenge": 0.25,
-                    "MMLU": 0.25,
-                    "GSM8K": 0.0,
-                    "HumanEval": 0.0,
-                }
-                task_results = {}
-                for task_name in all_tasks:
-                    limit = (
-                        config.chatcore_max_cat
-                        if task_name in categorical_tasks
-                        else config.chatcore_max_sample
-                    )
-                    max_problems = None if limit < 0 else limit  # -1 means no limit
-                    acc = run_chat_eval(
-                        task_name,
-                        original_model,
-                        tokenizer,
-                        engine,
-                        batch_size=config.device_batch_size,
-                        max_problems=max_problems,
-                    )
-                    task_results[task_name] = acc
-                    print_master(f"  {task_name}: {100 * acc:.2f}%")
+            # Compute ChatCORE metrics (mean centered accuracy, ranges from 0=random to 1=perfect)
+            def centered_mean(tasks):
+                return sum(
+                    (task_results[t] - baseline_accuracies[t]) / (1.0 - baseline_accuracies[t]) for t in tasks
+                ) / len(tasks)
 
-                # Compute ChatCORE metrics (mean centered accuracy, ranges from 0=random to 1=perfect)
-                def centered_mean(tasks):
-                    return sum(
-                        (task_results[t] - baseline_accuracies[t]) / (1.0 - baseline_accuracies[t])
-                        for t in tasks
-                    ) / len(tasks)
-
-                chatcore = centered_mean(all_tasks)
-                chatcore_cat = centered_mean(categorical_tasks)
-                print_master(f"Step {step:05d} | ChatCORE: {chatcore:.4f} | ChatCORE_cat: {chatcore_cat:.4f}")
-                if master_process and wandb_run is not None:
-                    wandb_run.log(
-                        {
-                            "step": step,
-                            "chatcore_metric": chatcore,
-                            "chatcore_cat": chatcore_cat,
-                            **{f"chatcore/{task_name}": acc for task_name, acc in task_results.items()},
-                        }
-                    )
-                compiled_model.train()
-
-            if last_step:
-                print_master("Stopping: reached last_step.")
-                break
-
-            synchronize()
-            t0 = time.time()
-
-            optimizer.zero_grad(set_to_none=True)
-
-            train_loss = None
-            for _ in range(grad_accum_steps):
-                loss = compiled_model(x, y)
-                train_loss = loss.detach()
-                loss = loss / grad_accum_steps
-
-                if scaler is not None:
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
-
-                x, y = next(train_loader)
-
-            # LR update
-            lrm = get_lr_multiplier(
-                progress=progress_state["approx_progress"],
-                warmdown_ratio=config.warmdown_ratio,
-                warmup_ratio=config.warmup_ratio,
-                final_lr_frac=config.final_lr_frac,
-            )
-            muon_momentum = get_muon_momentum(step)
-
-            for group in optimizer.param_groups:
-                group["lr"] = group["base_lr"] * lrm
-                if group.get("kind") == "muon":
-                    group["momentum"] = muon_momentum
-
-            # Optimizer step
-            if scaler is not None:
-                scaler.unscale_(optimizer)
-                if is_ddp_initialized():
-                    found_inf = getattr(scaler, "_found_inf_per_device", None)
-                    if found_inf is not None:
-                        vals = scaler._found_inf_per_device(optimizer)
-                        for v in vals.values():
-                            dist.all_reduce(v, op=dist.ReduceOp.MAX)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-
-            compiled_model.zero_grad(set_to_none=True)
-
-            synchronize()
-            t1 = time.time()
-            step_time = t1 - t0
-            step += 1
-
-            # Logging
-            tokens_per_step = (
-                config.device_batch_size * config.max_seq_len * ddp_world_size * grad_accum_steps
-            )
-            throughput = tokens_per_step / max(step_time, 1e-8)
-
-            if master_process:
-                log_dict = {
-                    "train/loss": train_loss.item() if train_loss is not None else None,
-                    "train/lr_multiplier": lrm,
-                    "train/epoch": progress_state["current_epoch"],
-                    "train/approx_progress": progress_state["approx_progress"],
-                    "perf/step_time_sec": step_time,
-                    "perf/tokens_per_sec": throughput,
-                    "perf/max_memory_bytes": get_max_memory(),
-                    "step": step,
-                }
-                wandb.log(log_dict, step=step)
-            print_master(
-                f"Step {step} | "
-                f"Loss: {train_loss.item():.4f} | "
-                f"LR Mult: {lrm:.4f} | "
-                f"Time: {step_time:.2f}s | "
-                f"Throughput: {throughput:,.0f} tok/s | "
-                f"Max Memory: {get_max_memory() / (1024**3):.2f} GB | "
-                f"Epoch: {progress_state['current_epoch']} | "
-                f"Progress: {progress_state['approx_progress']:.4f}"
-            )
-            # Save
-            if config.save_every > 0 and step % config.save_every == 0:
-                save_checkpoint(
-                    checkpoint_dir=MODEL_DIR,
-                    step=step,
-                    model_data=original_model.state_dict(),
-                    optimizer_data=optimizer.state_dict(),
-                    meta_data={
+            chatcore = centered_mean(all_tasks)
+            chatcore_cat = centered_mean(categorical_tasks)
+            print_master(f"Step {step:05d} | ChatCORE: {chatcore:.4f} | ChatCORE_cat: {chatcore_cat:.4f}")
+            if master_process and wandb_run is not None:
+                wandb_run.log(
+                    {
                         "step": step,
-                        "config": asdict(config),
-                        "progress_state": progress_state,
-                    },
-                    rank=ddp_rank,
+                        "chatcore_metric": chatcore,
+                        "chatcore_cat": chatcore_cat,
+                        **{f"chatcore/{task_name}": acc for task_name, acc in task_results.items()},
+                    }
                 )
+            compiled_model.train()
 
-            # Clean
-            if step % 5000 == 0:
-                gc.collect()
-                if device_type == "cuda":
-                    torch.cuda.empty_cache()
-    finally:
-        if master_process and wandb_run is not None:
-            wandb_run.finish()
-        clean_dist()
+        if last_step:
+            print_master("Stopping: reached last_step.")
+            break
+
+        synchronize()
+        t0 = time.time()
+
+        optimizer.zero_grad(set_to_none=True)
+
+        train_loss = None
+        for _ in range(grad_accum_steps):
+            loss = compiled_model(x, y)
+            train_loss = loss.detach()
+            loss = loss / grad_accum_steps
+
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            x, y = next(train_loader)
+
+        # LR update
+        lrm = get_lr_multiplier(
+            progress=progress_state["approx_progress"],
+            warmdown_ratio=config.warmdown_ratio,
+            warmup_ratio=config.warmup_ratio,
+            final_lr_frac=config.final_lr_frac,
+        )
+        muon_momentum = get_muon_momentum(step)
+
+        for group in optimizer.param_groups:
+            group["lr"] = group["base_lr"] * lrm
+            if group.get("kind") == "muon":
+                group["momentum"] = muon_momentum
+
+        # Optimizer step
+        if scaler is not None:
+            scaler.unscale_(optimizer)
+            if is_ddp_initialized():
+                found_inf = getattr(scaler, "_found_inf_per_device", None)
+                if found_inf is not None:
+                    vals = scaler._found_inf_per_device(optimizer)
+                    for v in vals.values():
+                        dist.all_reduce(v, op=dist.ReduceOp.MAX)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+
+        compiled_model.zero_grad(set_to_none=True)
+
+        synchronize()
+        t1 = time.time()
+        step_time = t1 - t0
+        step += 1
+
+        # Logging
+        tokens_per_step = config.device_batch_size * config.max_seq_len * ddp_world_size * grad_accum_steps
+        throughput = tokens_per_step / max(step_time, 1e-8)
+
+        if master_process:
+            log_dict = {
+                "train/loss": train_loss.item() if train_loss is not None else None,
+                "train/lr_multiplier": lrm,
+                "train/epoch": progress_state["current_epoch"],
+                "train/approx_progress": progress_state["approx_progress"],
+                "perf/step_time_sec": step_time,
+                "perf/tokens_per_sec": throughput,
+                "perf/max_memory_bytes": get_max_memory(),
+                "step": step,
+            }
+            wandb.log(log_dict, step=step)
+        print_master(
+            f"Step {step} | "
+            f"Loss: {train_loss.item():.4f} | "
+            f"LR Mult: {lrm:.4f} | "
+            f"Time: {step_time:.2f}s | "
+            f"Throughput: {throughput:,.0f} tok/s | "
+            f"Max Memory: {get_max_memory() / (1024**3):.2f} GB | "
+            f"Epoch: {progress_state['current_epoch']} | "
+            f"Progress: {progress_state['approx_progress']:.4f}"
+        )
+        # Save
+        if config.save_every > 0 and step % config.save_every == 0:
+            save_checkpoint(
+                checkpoint_dir=MODEL_DIR,
+                step=step,
+                model_data=original_model.state_dict(),
+                optimizer_data=optimizer.state_dict(),
+                meta_data={
+                    "step": step,
+                    "config": asdict(config),
+                    "progress_state": progress_state,
+                },
+                rank=ddp_rank,
+            )
+
+        # Clean
+        if step % 5000 == 0:
+            gc.collect()
+            if device_type == "cuda":
+                torch.cuda.empty_cache()
+    if master_process and wandb_run is not None:
+        wandb_run.finish()
+    clean_dist()
 
 
 if __name__ == "__main__":

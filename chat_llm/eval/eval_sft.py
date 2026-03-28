@@ -8,16 +8,14 @@ python -m scripts.chat_eval -a ARC-Easy
 torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
 """
 
-import argparse
 from functools import partial
 
 import torch
 import torch.distributed as dist
 
-from chat_llm.engine import GenerateEngine
-from chat_llm.task import ARC, GSM8K, MMLU, CustomJSON, SmolTalk, TaskMixture
-from chat_llm.utils.common import autodetect_device_type, print_master
-from chat_llm.utils.dist import clean_dist, dist_init, get_dist_info
+from chat_llm.task import ARC, GSM8K, MMLU, HumanEval
+from chat_llm.utils.common import print_master
+from chat_llm.utils.dist import get_dist_info
 
 # -----------------------------------------------------------------------------
 # Generative evaluation loop (we go one problem at a time, sample, evaluate)
@@ -91,7 +89,7 @@ def run_generative_eval(
 
 def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=None):
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    device = model.get_device()
+    device = model.device
     bos = tokenizer.get_bos_token_id()  # use BOS as pad token is ok, these positions are ignored
 
     # We'll process batches of independent problems at a time because there is no sampling needed
@@ -130,7 +128,7 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
             letters = conversation["letters"]
             letter_ids = []
             for letter in letters:
-                if not letter in letter_to_id_cache:
+                if letter not in letter_to_id_cache:
                     encoded_letter = tokenizer.encode(letter)
                     assert len(encoded_letter) == 1, "Each letter must be a single token"
                     letter_to_id_cache[letter] = encoded_letter[0]
