@@ -49,8 +49,8 @@ class Config:
     total_batch_size: int = -1
 
     # Optimizer hyperparameters
-    embedding_lr: float = 0.3
-    unembedding_lr: float = 0.004
+    embedding_lr: float = 0.03
+    unembedding_lr: float = 0.001
     matrix_lr: float = 0.02
     scalar_lr: float = 0.5
     weight_decay: float = 0.28
@@ -65,9 +65,9 @@ class Config:
     model_step: int = -1
 
     eval_every: int = 1000
-    sample_every: int = 50
+    sample_every: int = 200
     save_every: int = 1000
-    chatcore_every: int = 10
+    chatcore_every: int = 400
     chatcore_max_cat: int = -1
     chatcore_max_sample: int = 24
 
@@ -75,15 +75,15 @@ class Config:
     core_metric_max_per_task: int = 500
 
     # SFT
-    mmlu_epochs: int = 1
-    gsm8k_epochs: int = 1
+    mmlu_epochs: int = 2
+    gsm8k_epochs: int = 2
 
     compiled: bool = True
 
 
 prompt_samples = [
     "<|user_start|>What is the Transformer?<|user_end|><|assistant_start|>",
-    "<|user_start|>What is 1+1?<|user_end|><|assistant_start|>",
+    "<|user_start|>How to learning LLM?<|user_end|><|assistant_start|>",
 ]
 
 
