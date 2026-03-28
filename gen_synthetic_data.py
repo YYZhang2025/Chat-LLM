@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
-API_KEY = "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"
+API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_DIR = os.path.dirname(__file__)
 
 url = "https://openrouter.ai/api/v1/chat/completions"
