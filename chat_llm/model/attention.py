@@ -133,8 +133,8 @@ def flash_attn_with_kvcache(
     """
     if USE_FA3:
         cache_seqlens = _to_int32(cache_seqlens)
-        k_cache = _to_int32(k_cache)
-        v_cache = _to_int32(v_cache)
+        # k_cache = _to_int32(k_cache)
+        # v_cache = _to_int32(v_cache)
         return _fa3.flash_attn_with_kvcache(
             q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens, causal=causal, window_size=window_size
         )

@@ -25,7 +25,7 @@ def run_generative_eval(
     task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None
 ):
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    device = model.get_device()
+    device = model.device
 
     num_problems = len(task_object) if max_problems is None else min(len(task_object), max_problems)
 
