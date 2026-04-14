@@ -56,6 +56,25 @@ class Linear(nn.Linear):
         return F.linear(x, weight, bias)
 
 
+def pre_compute_cos_sin(
+    max_seq_len: int,
+    head_dim: int,
+    base: int = 100_000,
+    device: torch.device = torch.device("cpu"),
+    dtype: torch.dtype = torch.float32,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    channel_range = torch.arange(0, head_dim, 2, device=device, dtype=torch.float32)
+    inv_freq = 1.0 / (base ** (channel_range / head_dim))
+    pos_ids = torch.arange(max_seq_len, device=device, dtype=torch.float32)
+
+    freqs = torch.einsum("i,j->ij", pos_ids, inv_freq)  # (max_seq_len, head_dim // 2)
+    cos, sin = freqs.cos(), freqs.sin()  # (max_seq_len, head_dim // 2)
+    cos, sin = cos.to(dtype=dtype), sin.to(dtype=dtype)
+    cos = cos[None, :, None, :]  # (1, max_seq_len, 1, head_dim // 2)
+    sin = sin[None, :, None, :]  # (1, max_seq_len, 1, head_dim // 2)
+    return cos, sin
+
+
 def apply_rotary_embedding(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """
     x = cos * x
@@ -176,35 +195,51 @@ class MLP(nn.Module):
         return self.down_proj(F.silu(gate) * self.up_proj(x))
 
 
+def full_attn_res(
+    states: list[torch.Tensor],
+    q: nn.Parameter,
+):
+    assert len(states) > 0, "States list must not be empty"
+    V = torch.stack(states, dim=0)  # (num_states, B, T, C)
+    K = rms_norm(V)
+
+    logits = torch.einsum("d, nbtd -> nbt", q, K)
+    weights = F.softmax(logits, dim=0)  # (num_states, B, T)
+    h = torch.einsum("nbt, nbtd -> btd", weights, V)
+    return h
+
+
 class Block(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, ve, cos, sin, window_size, kv_cache):
-        x = x + self.attn(rms_norm(x), ve, cos, sin, window_size, kv_cache)
-        x = x + self.mlp(rms_norm(x))
-        return x
+        self.attn_res = full_attn_res
+        self.mlp_res = full_attn_res
 
+        # Full Attention Residual Projections
+        self.attn_res_q = nn.Parameter(torch.randn(config.embed_dim))
+        self.mlp_res_q = nn.Parameter(torch.randn(config.embed_dim))
 
-def pre_compute_cos_sin(
-    max_seq_len: int,
-    head_dim: int,
-    base: int = 100_000,
-    device: torch.device = torch.device("cpu"),
-    dtype: torch.dtype = torch.float32,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    channel_range = torch.arange(0, head_dim, 2, device=device, dtype=torch.float32)
-    inv_freq = 1.0 / (base ** (channel_range / head_dim))
-    pos_ids = torch.arange(max_seq_len, device=device, dtype=torch.float32)
+    def forward(self, states, ve, cos, sin, window_size, kv_cache):
+        # Regular attention + MLP with residual connections
+        # x = x + self.attn(rms_norm(x), ve, cos, sin, window_size, kv_cache)
+        # x = x + self.mlp(rms_norm(x))
+        # return x
 
-    freqs = torch.einsum("i,j->ij", pos_ids, inv_freq)  # (max_seq_len, head_dim // 2)
-    cos, sin = freqs.cos(), freqs.sin()  # (max_seq_len, head_dim // 2)
-    cos, sin = cos.to(dtype=dtype), sin.to(dtype=dtype)
-    cos = cos[None, :, None, :]  # (1, max_seq_len, 1, head_dim // 2)
-    sin = sin[None, :, None, :]  # (1, max_seq_len, 1, head_dim // 2)
-    return cos, sin
+        h_attn = self.attn_res(states, self.attn_res_q)  # [B,T,C]
+        attn_out = self.attn(rms_norm(h_attn), ve, cos, sin, window_size, kv_cache)
+        x_after_attn = h_attn + attn_out
+        states.append(x_after_attn)
+
+        # ---- Before MLP: Full AttnRes aggregation again ----
+        h_mlp = self.mlp_res(states, self.mlp_res_q)  # [B,T,C]
+        mlp_out = self.mlp(rms_norm(h_mlp))
+        x_after_mlp = h_mlp + mlp_out
+        states.append(x_after_mlp)
+
+        return x_after_mlp, states
 
 
 class LLMModel(nn.Module):
@@ -287,6 +322,9 @@ class LLMModel(nn.Module):
             nn.init.uniform_(block.mlp.gate_proj.weight, -s * 0.5, s * 0.5)
             nn.init.zeros_(block.mlp.down_proj.weight)
 
+            nn.init.zeros_(block.attn_res_q)
+            nn.init.zeros_(block.mlp_res_q)
+
         self.resid_lambdas.fill_(1.0)  # 1.0 => typical residual connections at init
         self.x0_lambdas.fill_(0.1)  # 0.1 => small initial weight for skip connection to input embedding
 
@@ -321,10 +359,11 @@ class LLMModel(nn.Module):
 
         x0 = x
 
+        residual_states = [x0]
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx).to(x.dtype) if str(i) in self.value_embeds else None
-            x = block(x, ve, cos, sin, self.window_sizes[i], kv_cache)
+            x, residual_states = block(residual_states, ve, cos, sin, self.window_sizes[i], kv_cache)
 
         x = rms_norm(x)
 
@@ -435,6 +474,18 @@ if __name__ == "__main__":
     config = ModelConfig()
     model = LLMModel(config)
     model.init_weights()
+    B = 2
+    T = 16
+    dummy_input = torch.randint(0, config.vocab_size, (B, T), dtype=torch.long)
+    dummy_targets = torch.randint(0, config.vocab_size, (B, T), dtype=torch.long)
+    dummy_loss = model(dummy_input, dummy_targets)
+    dummy_output = model(dummy_input)
+
+    print("Dummy loss:", dummy_loss)
+    assert dummy_output.shape == (B, T, config.vocab_size), (
+        f"Expected output shape {(B, T, config.vocab_size)}, got {dummy_output.shape}"
+    )
+    print("Dummy output shape:", dummy_output.shape)
 
     print("Model parameter count:", sum(p.numel() for p in model.parameters()))
     print_master("Model initialized successfully")

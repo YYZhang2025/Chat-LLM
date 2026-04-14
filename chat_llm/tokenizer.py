@@ -20,6 +20,12 @@ SPECIAL_TOKENS = [
     "<|python_end|>",
     "<|output_start|>",  # python REPL outputs back to assistant
     "<|output_end|>",
+    "<think>",  # for chain-of-thought prompting
+    "</think>",
+    "<tool_call>",  # for tool calls more generally (beyond just python)
+    "</tool_call>",
+    "<tool_response>",  # for tool responses more generally (beyond just python output)
+    "</tool_response>",
 ]
 
 
