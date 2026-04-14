@@ -88,7 +88,7 @@ def apply_rotary_embedding(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     x1, x2 = x.chunk(2, dim=-1)
 
     y1 = x1 * cos + x2 * sin
-    y2 = x1 * (-sin) + x2 * cos
+    y2 = x2 * cos + (-x1) * sin
     return torch.cat([y1, y2], dim=-1)
 
 
@@ -185,14 +185,12 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-
-        self.up_proj = Linear(config.embed_dim, config.d_ff, bias=False)
+        self.gate_up_proj = Linear(config.embed_dim, 2 * config.d_ff, bias=False)
         self.down_proj = Linear(config.d_ff, config.embed_dim, bias=False)
-        self.gate_proj = Linear(config.embed_dim, config.d_ff, bias=False)
 
     def forward(self, x):
-        gate = self.gate_proj(x)
-        return self.down_proj(F.silu(gate) * self.up_proj(x))
+        gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+        return self.down_proj(F.silu(gate) * up)
 
 
 def full_attn_res(
@@ -282,7 +280,6 @@ class LLMModel(nn.Module):
 
         self.rotary_seq_len = config.max_seq_len * 10
         cos, sin = pre_compute_cos_sin(self.rotary_seq_len, head_dim, device=self.device, dtype=COMPUTE_DTYPE)
-
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
